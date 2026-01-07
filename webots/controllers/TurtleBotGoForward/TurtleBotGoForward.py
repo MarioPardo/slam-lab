@@ -3,6 +3,7 @@
 # You may need to import some classes of the controller module. Ex:
 #  from controller import Robot, Motor, DistanceSensor
 from controller import Robot, Motor
+from robot_comm import RobotPublisher
 
 TIME_STEP = 64
 MAX_SPEED = 6.28
@@ -22,6 +23,10 @@ rightMotor.setPosition(float('inf'))
 #Lidar Setup
 lidar = robot.getLidar("lidar")
 lidar.enable(TIME_STEP)
+
+# ZMQ Publisher Setup
+publisher = RobotPublisher()
+message_counter = 0
 
 
 while robot.step(TIME_STEP) != -1:
@@ -49,6 +54,11 @@ while robot.step(TIME_STEP) != -1:
 
     range_image = lidar.getRangeImage()
     lidar.enablePointCloud()
+    
+    # Send hello message every 100 timesteps
+    message_counter += 1
+    if message_counter % 100 == 0:
+        publisher.publish_hello(f"Hello from TurtleBot! Counter: {message_counter}")
     
 
 
