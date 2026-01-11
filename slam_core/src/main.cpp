@@ -21,7 +21,7 @@ int main(int argc, char* argv[]) {
         slam::ZMQSubscriber subscriber("tcp://localhost:5555");
         slam::ZMQPublisher publisher("tcp://*:5556");
         
-        subscriber.subscribe("data");
+        subscriber.subscribe("robot_state");
         std::cout << "[Main] Waiting for messages... (Press Ctrl+C to exit)" << std::endl;
         
         // Message callback that sends a response

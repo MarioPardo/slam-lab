@@ -37,6 +37,15 @@ class RobotPublisher:
         """Publish sensor data to C++."""
         self.publish_message("data", {"value": data})
     
+    def publish_robot_state(self, header, odometry, lidar):
+        """Publish comprehensive robot state."""
+        robot_state = {
+            "header": header,
+            "odometry": odometry,
+            "lidar": lidar
+        }
+        self.publish_message("robot_state", robot_state)
+    
     def close(self):
         """Clean up ZMQ resources."""
         self.socket.close()
