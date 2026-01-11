@@ -1,6 +1,8 @@
 #include "zmq_bridge.h"
 #include <iostream>
 #include <sstream>
+#include <thread>
+#include <chrono>
 
 namespace slam {
 
@@ -76,6 +78,30 @@ void ZMQSubscriber::startListening(
             std::cerr << "[ZMQSubscriber] Error: " << e.what() << std::endl;
         }
     }
+}
+
+
+ZMQPublisher::ZMQPublisher(const std::string& address)
+    : context_(1), socket_(context_, zmq::socket_type::pub), address_(address) 
+    {
+    
+    socket_.bind(address_);
+    std::cout << "[ZMQPublisher] Bound to " << address_ << std::endl;
+    
+    // Small delay to allow subscribers to connect
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+
+ZMQPublisher::~ZMQPublisher() 
+{
+    socket_.close();
+    std::cout << "[ZMQPublisher] Closed" << std::endl;
+}
+
+void ZMQPublisher::publishMessage(const std::string& topic, const std::string& message) 
+{
+    std::string full_message = topic + " " + message;
+    socket_.send(zmq::buffer(full_message), zmq::send_flags::none);
 }
 
 } // namespace slam

@@ -33,8 +33,62 @@ class RobotPublisher:
     def publish_hello(self, message="Hello from robot!"):
         self.publish_message("hello", {"message": message})
     
+    def publish_data(self, data):
+        """Publish sensor data to C++."""
+        self.publish_message("data", {"value": data})
+    
     def close(self):
         """Clean up ZMQ resources."""
         self.socket.close()
         self.context.term()
         print("[RobotPublisher] Closed")
+
+
+class RobotSubscriber:
+    """Subscriber for receiving processed data from C++ via ZMQ."""
+    
+    def __init__(self, address="tcp://localhost:5556"):
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.SUB)
+        self.socket.connect(address)
+        print(f"[RobotSubscriber] Connected to {address}")
+    
+    def subscribe(self, topic=""):
+        """Subscribe to a topic. Empty string subscribes to all topics."""
+        self.socket.subscribe(topic)
+        print(f"[RobotSubscriber] Subscribed to topic: '{topic}'")
+    
+    def receive_message(self, timeout_ms=0):
+        """
+        Receive a message with optional timeout.
+        Returns (topic, message_dict) or None if timeout.
+        """
+        # Set receive timeout (0 = non-blocking)
+        self.socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+        
+        try:
+            full_message = self.socket.recv_string()
+            
+            # Split into topic and message (format: "topic message_json")
+            parts = full_message.split(' ', 1)
+            if len(parts) != 2:
+                print(f"[RobotSubscriber] Invalid message format: {full_message}")
+                return None
+            
+            topic = parts[0]
+            message_dict = json.loads(parts[1])
+            
+            return (topic, message_dict)
+            
+        except zmq.Again:
+            # Timeout - no message available
+            return None
+        except Exception as e:
+            print(f"[RobotSubscriber] Error receiving message: {e}")
+            return None
+    
+    def close(self):
+        """Clean up ZMQ resources."""
+        self.socket.close()
+        self.context.term()
+        print("[RobotSubscriber] Closed")

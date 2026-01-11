@@ -3,7 +3,7 @@
 # You may need to import some classes of the controller module. Ex:
 #  from controller import Robot, Motor, DistanceSensor
 from controller import Robot, Motor
-from robot_comm import RobotPublisher
+from robot_comm import RobotPublisher, RobotSubscriber
 
 TIME_STEP = 64
 MAX_SPEED = 6.28
@@ -24,9 +24,14 @@ rightMotor.setPosition(float('inf'))
 lidar = robot.getLidar("lidar")
 lidar.enable(TIME_STEP)
 
-# ZMQ Publisher Setup
+# ZMQ Publisher Setup (send data to C++)
 publisher = RobotPublisher()
+# ZMQ Subscriber Setup (receive responses from C++)
+subscriber = RobotSubscriber()
+subscriber.subscribe("response")  # Subscribe to response topic
+
 message_counter = 0
+fake_data_value = 42  # Hardcoded test data
 
 
 while robot.step(TIME_STEP) != -1:
@@ -55,10 +60,18 @@ while robot.step(TIME_STEP) != -1:
     range_image = lidar.getRangeImage()
     lidar.enablePointCloud()
     
-    # Send hello message every 100 timesteps
+    # Send fake data every 100 timesteps
     message_counter += 1
     if message_counter % 100 == 0:
-        publisher.publish_hello(f"Hello from TurtleBot! Counter: {message_counter}")
+        publisher.publish_data(fake_data_value)
+        print(f"[Python] Sent data: {fake_data_value}")
+        fake_data_value += 1  # Increment for next time
+    
+    # Check for responses from C++ (non-blocking)
+    response = subscriber.receive_message(timeout_ms=0)
+    if response:
+        topic, msg = response
+        print(f"[Python] Received from C++ on '{topic}': {msg}")
     
 
 

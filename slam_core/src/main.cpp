@@ -10,12 +10,8 @@ void signalHandler(int signal) {
     running = 0;
 }
 
-void messageCallback(const std::string& topic, const std::string& message) {
-    std::cout << "[Main] Received on topic '" << topic << "': " << message << std::endl;
-}
-
 int main(int argc, char* argv[]) {
-    std::cout << "=== SLAM Core - ZMQ Subscriber ===" << std::endl;
+    std::cout << "=== SLAM Core - ZMQ Bidirectional Communication ===" << std::endl;
     
     // Setup signal handling for clean shutdown (Ctrl+C)
     std::signal(SIGINT, signalHandler);
@@ -23,9 +19,21 @@ int main(int argc, char* argv[]) {
     
     try {
         slam::ZMQSubscriber subscriber("tcp://localhost:5555");
-    
-        subscriber.subscribe("hello");
+        slam::ZMQPublisher publisher("tcp://*:5556");
+        
+        subscriber.subscribe("data");
         std::cout << "[Main] Waiting for messages... (Press Ctrl+C to exit)" << std::endl;
+        
+        // Message callback that sends a response
+        auto messageCallback = [&publisher](const std::string& topic, const std::string& message) 
+        {
+            std::cout << "[Main] Received on topic '" << topic << "': " << message << std::endl;
+            
+            // Send response back 
+            std::string response = "{\"status\": \"received\", \"original\": " + message + "}";
+            publisher.publishMessage("response", response);
+            std::cout << "[Main] Sent response: " << response << std::endl;
+        };
         
         // Listen for messages
         while (running) {

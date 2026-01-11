@@ -29,6 +29,22 @@ private:
     std::string address_;
 };
 
+
+class ZMQPublisher {
+public:
+
+    explicit ZMQPublisher(const std::string& address = "tcp://*:5556");
+
+    ~ZMQPublisher();
+
+    void publishMessage(const std::string& topic, const std::string& message);
+
+private:
+    zmq::context_t context_;
+    zmq::socket_t socket_;
+    std::string address_;
+};
+
 } // namespace slam
 
 #endif // ZMQ_BRIDGE_H
