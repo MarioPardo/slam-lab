@@ -23,11 +23,14 @@ find_package(cppzmq REQUIRED)
 set(SOURCES
     src/main.cpp
     src/zmq_bridge.cpp
+    src/odometry.cpp
 )
 
 
 set(HEADERS
     src/zmq_bridge.h
+    src/odometry.h
+    src/types.h
 )
 
 
