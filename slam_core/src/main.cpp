@@ -1,10 +1,12 @@
 #include "zmq_bridge.h"
 #include "odometry.h"
+#include "lidar_processor.h"
 #include "types.h"
 #include <iostream>
 #include <csignal>
 #include <sstream>
 #include <cmath>
+#include <vector>
 
 // Global flag for clean shutdown
 volatile sig_atomic_t running = 1;
@@ -14,7 +16,8 @@ void signalHandler(int signal) {
     running = 0;
 }
 
-// Helper function to parse JSON string
+// Helper function to parse JSON string////
+
 double extractDouble(const std::string& json, const std::string& key) {
     size_t pos = json.find("\"" + key + "\"");
     if (pos == std::string::npos) return 0.0;
@@ -28,6 +31,46 @@ double extractDouble(const std::string& json, const std::string& key) {
     std::string value = json.substr(start, end - start);
     return std::stod(value);
 }
+
+int extractInt(const std::string& json, const std::string& key) {
+    size_t pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return 0;
+    
+    pos = json.find(":", pos);
+    if (pos == std::string::npos) return 0;
+    
+    size_t start = pos + 1;
+    size_t end = json.find_first_of(",}", start);
+    
+    std::string value = json.substr(start, end - start);
+    return std::stoi(value);
+}
+
+std::vector<double> extractDoubleArray(const std::string& json, const std::string& key) {
+    std::vector<double> result;
+    size_t pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return result;
+    
+    size_t array_start = json.find("[", pos);
+    size_t array_end = json.find("]", array_start);
+    if (array_start == std::string::npos || array_end == std::string::npos) return result;
+    
+    std::string array_content = json.substr(array_start + 1, array_end - array_start - 1);
+    std::istringstream iss(array_content);
+    std::string token;
+    
+    while (std::getline(iss, token, ',')) {
+        try {
+            result.push_back(std::stod(token));
+        } catch (...) {
+            result.push_back(std::numeric_limits<double>::infinity());
+        }
+    }
+    
+    return result;
+}
+
+///////
 
 int main(int argc, char* argv[]) {
     std::cout << "=== SLAM Core - ZMQ Bidirectional Communication ===" << std::endl;
@@ -44,6 +87,10 @@ int main(int argc, char* argv[]) {
         // Wheel radius: 33mm = 0.033m
         // Wheelbase: 160mm = 0.16m
         slam::OdometryProcessor odometry(0.033, 0.16);
+        slam::LidarProcessor lidar;
+        
+        std::vector<slam::Pose2D> trajectory;
+        std::vector<slam::Point2D> lidar_points;
         
         subscriber.subscribe("robot_state");
         std::cout << "[Main] Waiting for messages... (Press Ctrl+C to exit)" << std::endl;
@@ -51,7 +98,7 @@ int main(int argc, char* argv[]) {
         int message_count = 0;
         
         // Message callback that sends a response
-        auto messageCallback = [&publisher, &odometry, &message_count](const std::string& topic, const std::string& message) 
+        auto messageCallback = [&publisher, &odometry, &lidar, &trajectory, &lidar_points, &message_count](const std::string& topic, const std::string& message) 
         {
             message_count++;
             
@@ -75,25 +122,45 @@ int main(int argc, char* argv[]) {
                 }
                 
                 slam::Pose2D pose = odometry.update(odom);
+                trajectory.push_back(pose);
                 
-                // Print pose every 10 messages
-                if (message_count % 10 == 0) {
-                    std::cout << "[Main] Message " << message_count 
-                              << " | Pose: x=" << pose.x 
-                              << " m, y=" << pose.y 
-                              << " m, θ=" << (pose.theta * 180.0 / M_PI) 
-                              << "°" << std::endl;
+                slam::LidarScan scan;
+                size_t lidar_pos = message.find("\"lidar\"");
+                if (lidar_pos != std::string::npos) {
+                    scan.timestamp = odom.timestamp;
+                    scan.count = extractInt(message, "count");
+                    scan.angle_min = extractDouble(message, "angle_min");
+                    scan.angle_max = extractDouble(message, "angle_max");
+                    scan.range_min = extractDouble(message, "range_min");
+                    scan.range_max = extractDouble(message, "range_max");
+                    scan.ranges = extractDoubleArray(message, "ranges");
+                    
+                    std::vector<slam::Point2D> new_points = lidar.transformToWorld(scan, pose);
+                    lidar_points.insert(lidar_points.end(), new_points.begin(), new_points.end());
                 }
                 
-                // respond back with current pose
-                std::ostringstream response;
-                response << "{\"status\": \"ok\", "
-                         << "\"message_count\": " << message_count << ", "
-                         << "\"pose\": {\"x\": " << pose.x << ", "
-                         << "\"y\": " << pose.y << ", "
-                         << "\"theta\": " << pose.theta << "}}";
-                
-                publisher.publishMessage("response", response.str());
+                if (message_count % 1 == 0) {
+                    std::cout << "[Main] Message " << message_count 
+                              << " | Pose: (" << pose.x << ", " << pose.y << ", " 
+                              << (pose.theta * 180.0 / M_PI) << "°)"
+                              << " | Trajectory: " << trajectory.size()
+                              << " | Points: " << lidar_points.size() << std::endl;
+                    
+                    std::ostringstream viz_data;
+                    viz_data << "{\"trajectory\": ["; //header
+                    for (size_t i = 0; i < trajectory.size(); i++) {
+                        if (i > 0) viz_data << ",";
+                        viz_data << "{\"x\":" << trajectory[i].x << ",\"y\":" << trajectory[i].y << "}";
+                    }
+                    viz_data << "],\"lidar_points\":["; //header
+                    for (size_t i = 0; i < lidar_points.size(); i++) {
+                        if (i > 0) viz_data << ",";
+                        viz_data << "{\"x\":" << lidar_points[i].x << ",\"y\":" << lidar_points[i].y << "}";
+                    }
+                    viz_data << "]}";
+                    
+                    publisher.publishMessage("visualization", viz_data.str());
+                }
                 
             } catch (const std::exception& e) {
                 std::cerr << "[Main] Error parsing message: " << e.what() << std::endl;

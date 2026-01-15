@@ -24,12 +24,14 @@ set(SOURCES
     src/main.cpp
     src/zmq_bridge.cpp
     src/odometry.cpp
+    src/lidar_processor.cpp
 )
 
 
 set(HEADERS
     src/zmq_bridge.h
     src/odometry.h
+    src/lidar_processor.h
     src/types.h
 )
 

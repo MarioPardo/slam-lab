@@ -1,0 +1,25 @@
+File used to keep track of progress and plan next steps
+
+Phase 1: Data and Constraints []
+ * this is where we create the pose graphs
+
+
+ []Watch Cyrill Stachniss "Graph Based SLAM using Pose Graphs" lecture
+
+    Deliverable:
+    "Spaghetti Plot" where we plot incomding oometry poses. 
+
+
+Phase 2:  Scan Matching
+
+    Deliverable: 
+    Point Cloud Overlay showing mulitple scans working together
+
+Phase 3: Back End Optimization
+
+    Deliverable: Snapped Map
+    Sphaghetti graph from phase 1 straightens out and aligns with wall
+
+Phase 4: Loop Closure
+
+

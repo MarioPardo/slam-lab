@@ -93,8 +93,9 @@ while robot.step(TIME_STEP) != -1:
     lidar_ranges = lidar.getRangeImage()
     lidar_data = {
         "count": len(lidar_ranges),
-        "angle_min": 0.0,
-        "angle_max": 2 * math.pi,
+        #lidar has 90dg fov with straight ahead being at center of fov
+        "angle_min": -(math.pi/4),
+        "angle_max": (math.pi/4),
         "range_min": lidar.getMinRange(),
         "range_max": lidar.getMaxRange(),
         "ranges": [float('inf') if r == float('inf') else r for r in lidar_ranges]
