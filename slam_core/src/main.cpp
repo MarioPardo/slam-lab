@@ -1,6 +1,7 @@
 #include "zmq_bridge.h"
 #include "odometry.h"
 #include "lidar_processor.h"
+#include "occupancy_grid.h"
 #include "types.h"
 #include <iostream>
 #include <csignal>
@@ -72,7 +73,7 @@ std::vector<double> extractDoubleArray(const std::string& json, const std::strin
 
 ///////
 
-int main(int argc, char* argv[]) {
+int main(int /*argc*/, char* /*argv*/[]) {
     std::cout << "=== SLAM Core - ZMQ Bidirectional Communication ===" << std::endl;
     
     // Setup signal handling for clean shutdown (Ctrl+C)
@@ -89,8 +90,10 @@ int main(int argc, char* argv[]) {
         slam::OdometryProcessor odometry(0.033, 0.16);
         slam::LidarProcessor lidar;
         
+        slam::OccupancyGrid grid(0.05, 400, 400, -10.0, -10.0);
+        constexpr double occupied_threshold = 0.65;
+        
         std::vector<slam::Pose2D> trajectory;
-        std::vector<slam::Point2D> lidar_points;
         
         subscriber.subscribe("robot_state");
         std::cout << "[Main] Waiting for messages... (Press Ctrl+C to exit)" << std::endl;
@@ -98,7 +101,7 @@ int main(int argc, char* argv[]) {
         int message_count = 0;
         
         // Message callback that sends a response
-        auto messageCallback = [&publisher, &odometry, &lidar, &trajectory, &lidar_points, &message_count](const std::string& topic, const std::string& message) 
+        auto messageCallback = [&publisher, &odometry, &grid, &trajectory, &message_count, occupied_threshold](const std::string& /*topic*/, const std::string& message) 
         {
             message_count++;
             
@@ -135,27 +138,30 @@ int main(int argc, char* argv[]) {
                     scan.range_max = extractDouble(message, "range_max");
                     scan.ranges = extractDoubleArray(message, "ranges");
                     
-                    std::vector<slam::Point2D> new_points = lidar.transformToWorld(scan, pose);
-                    lidar_points.insert(lidar_points.end(), new_points.begin(), new_points.end());
+                    grid.updateWithScan(scan, pose);
                 }
                 
                 if (message_count % 1 == 0) {
+                    auto occupied_cells = grid.getOccupiedWorldPoints(occupied_threshold);
+                    
                     std::cout << "[Main] Message " << message_count 
                               << " | Pose: (" << pose.x << ", " << pose.y << ", " 
                               << (pose.theta * 180.0 / M_PI) << "°)"
                               << " | Trajectory: " << trajectory.size()
-                              << " | Points: " << lidar_points.size() << std::endl;
+                              << " | Occupied Cells: " << occupied_cells.size() << std::endl;
                     
                     std::ostringstream viz_data;
-                    viz_data << "{\"trajectory\": ["; //header
+                    viz_data << "{\"trajectory\": [";
                     for (size_t i = 0; i < trajectory.size(); i++) {
                         if (i > 0) viz_data << ",";
                         viz_data << "{\"x\":" << trajectory[i].x << ",\"y\":" << trajectory[i].y << "}";
                     }
-                    viz_data << "],\"lidar_points\":["; //header
-                    for (size_t i = 0; i < lidar_points.size(); i++) {
+                    viz_data << "],\"grid_cells\":[";
+                    for (size_t i = 0; i < occupied_cells.size(); i++) {
                         if (i > 0) viz_data << ",";
-                        viz_data << "{\"x\":" << lidar_points[i].x << ",\"y\":" << lidar_points[i].y << "}";
+                        viz_data << "{\"x\":" << occupied_cells[i].first.x 
+                                 << ",\"y\":" << occupied_cells[i].first.y 
+                                 << ",\"p\":" << occupied_cells[i].second << "}";
                     }
                     viz_data << "]}";
                     

@@ -6,7 +6,7 @@ namespace slam {
 
 LidarProcessor::LidarProcessor() {}
 
-//Transform LIDAR a whole lidar scan from robot frame to world frame
+//Transform LIDAR a whole lidar scan points from robot frame to world frame
 std::vector<Point2D> LidarProcessor::transformToWorld(const LidarScan& scan, const Pose2D& robot_pose) {
     std::vector<Point2D> world_points;
     world_points.reserve(scan.count);

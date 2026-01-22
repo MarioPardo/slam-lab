@@ -25,6 +25,7 @@ set(SOURCES
     src/zmq_bridge.cpp
     src/odometry.cpp
     src/lidar_processor.cpp
+    src/occupancy_grid.cpp
 )
 
 
