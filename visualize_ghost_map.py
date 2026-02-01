@@ -55,13 +55,17 @@ def update_plot(frame):
         grid_cells_y = [c['y'] for c in grid_cells]
         grid_cells_prob = [c['p'] for c in grid_cells]
         
+        #draw trajectory line
         if trajectory_x and trajectory_y:
             trajectory_line.set_data(trajectory_x, trajectory_y)
         
+        # Update Occupancy grid scatter plot
         if grid_cells_x and grid_cells_y and grid_cells_prob:
             grid_scatter.set_offsets(list(zip(grid_cells_x, grid_cells_y)))
             grid_scatter.set_array(np.array(grid_cells_prob))
         
+
+        # Adjust plot limits dynamically
         if trajectory_x or grid_cells_x:
             all_x = trajectory_x + grid_cells_x
             all_y = trajectory_y + grid_cells_y

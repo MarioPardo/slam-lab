@@ -19,6 +19,9 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 # Find ZeroMQ (cppzmq header-only wrapper + zmq library)
 find_package(cppzmq REQUIRED)
 
+# Find Eigen3 (header-only linear algebra library)
+find_package(Eigen3 REQUIRED NO_MODULE)
+
 
 set(SOURCES
     src/main.cpp
@@ -26,6 +29,7 @@ set(SOURCES
     src/odometry.cpp
     src/lidar_processor.cpp
     src/occupancy_grid.cpp
+    src/icp_matcher.cpp
 )
 
 
@@ -33,6 +37,7 @@ set(HEADERS
     src/zmq_bridge.h
     src/odometry.h
     src/lidar_processor.h
+    src/icp_matcher.h
     src/types.h
 )
 
@@ -43,6 +48,7 @@ add_executable(slam_subscriber ${SOURCES} ${HEADERS})
 target_link_libraries(slam_subscriber 
     PRIVATE 
     cppzmq
+    Eigen3::Eigen
 )
 
 
@@ -54,6 +60,22 @@ target_include_directories(slam_subscriber
 
 install(TARGETS slam_subscriber
     RUNTIME DESTINATION bin
+)
+
+# Test executable for ICP
+add_executable(test_icp
+    tests/test_icp_transform.cpp
+    src/icp_matcher.cpp
+)
+
+target_link_libraries(test_icp
+    PRIVATE
+    Eigen3::Eigen
+)
+
+target_include_directories(test_icp
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 # Print configuration

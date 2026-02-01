@@ -2,6 +2,8 @@
 #define SLAM_TYPES_H
 
 #include <vector>
+#include <Eigen/Dense>
+#include <Eigen/SVD>
 
 namespace slam {
 
@@ -45,6 +47,22 @@ struct Point2D {
     
     Point2D() : x(0.0), y(0.0) {}
     Point2D(double x_, double y_) : x(x_), y(y_) {}
+};
+
+struct Transform2D {
+    Eigen::Matrix2d rotation;     
+    Eigen::Vector2d translation; 
+    
+    //constructors
+    Transform2D() : rotation(Eigen::Matrix2d::Identity()), 
+                    translation(Eigen::Vector2d::Zero()) {}
+    
+    Transform2D(const Eigen::Matrix2d& R, const Eigen::Vector2d& t) 
+        : rotation(R), translation(t) {}
+    
+    Eigen::Vector2d apply(const Eigen::Vector2d& point) const {
+        return rotation * point + translation;
+    }
 };
 
 } // namespace slam
