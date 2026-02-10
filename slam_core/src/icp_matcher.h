@@ -16,20 +16,33 @@ struct CorrespondencePair {
         : source(src), target(tgt), weight(w) {}
 };
 
-// YOUR TASK: Implement this core function
-// Given corresponding point pairs with weights, compute the optimal transformation
-// that minimizes the weighted sum of squared distances:
-//   E(R, t) = Σ w_i * ||R*p_i + t - q_i||²
-//
-// STEPS TO IMPLEMENT:
-// 1. Compute weighted centroids of source and target points
-// 2. Center both point clouds by subtracting their respective centroids
-// 3. Build the cross-covariance matrix H = Σ w_i * (p_i - p̄) * (q_i - q̄)ᵀ
-// 4. Compute SVD of H: H = U * Σ * Vᵀ
-// 5. Extract rotation: R = V * Uᵀ (check that det(R) = +1)
-// 6. Compute translation: t = q̄ - R * p̄
-// 7. Return Transform2D(R, t)
 Transform2D estimateTransform(const std::vector<CorrespondencePair>& correspondences);
+
+std::vector<Eigen::Vector2d> transformPointCloud(
+    const std::vector<Eigen::Vector2d>& points,
+    const Transform2D& transform);
+
+std::vector<CorrespondencePair> findCorrespondencesPointToPoint(
+    const std::vector<Eigen::Vector2d>& source,
+    const std::vector<Eigen::Vector2d>& target,
+    double max_distance);
+
+//TODO try point to plane (line) correspondence matching
+
+struct ICPResult {
+    Transform2D transform;
+    int iterations;
+    double final_error;
+    bool converged;
+};
+
+ICPResult alignPointClouds(
+    const std::vector<Eigen::Vector2d>& source,
+    const std::vector<Eigen::Vector2d>& target,
+    const Transform2D& initial_guess,
+    int max_iterations,
+    double convergence_epsilon,
+    double correspondence_distance);
 
 } // namespace slam
 

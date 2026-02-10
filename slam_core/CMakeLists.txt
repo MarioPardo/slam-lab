@@ -78,6 +78,21 @@ target_include_directories(test_icp
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+add_executable(test_icp_full
+    tests/test_icp_full.cpp
+    src/icp_matcher.cpp
+)
+
+target_link_libraries(test_icp_full
+    PRIVATE
+    Eigen3::Eigen
+)
+
+target_include_directories(test_icp_full
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
 # Print configuration
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")

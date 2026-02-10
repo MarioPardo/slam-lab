@@ -1,5 +1,6 @@
 #include "icp_matcher.h"
 #include <iostream>
+#include <limits>
 
 namespace slam {
 
@@ -48,6 +49,106 @@ Transform2D estimateTransform(const std::vector<CorrespondencePair>& corresponde
     
     
     return Transform2D(RotationMatrix, TranslationVector);
+}
+
+std::vector<Eigen::Vector2d> transformPointCloud(
+    const std::vector<Eigen::Vector2d>& points,
+    const Transform2D& transform)
+{
+    std::vector<Eigen::Vector2d> transformed;
+    
+   for (const Eigen::Vector2d &p : points) {
+        transformed.push_back(transform.rotation * p + transform.translation);
+    }
+    
+    return transformed;
+}
+
+//TODO use KD trees
+std::vector<CorrespondencePair> findCorrespondencesPointToPoint(
+    const std::vector<Eigen::Vector2d>& source,
+    const std::vector<Eigen::Vector2d>& target,
+    double max_distance)
+{
+    std::vector<CorrespondencePair> correspondences;
+    
+    for (const Eigen::Vector2d &spoint : source)
+    {
+        float bestdistance = std::numeric_limits<float>::infinity();
+        CorrespondencePair best_pair(spoint, Eigen::Vector2d::Zero(), 0.0);
+        
+        for(const Eigen::Vector2d &tpoint : target)
+        {
+            float distance = (spoint - tpoint).norm();
+            if (distance < bestdistance)
+            {
+                bestdistance = distance;
+                double weight = 1 - (distance / max_distance);
+                best_pair = CorrespondencePair(spoint, tpoint, weight);
+            }
+        }
+
+        //reject based on max distance
+        if (bestdistance < max_distance)
+            correspondences.push_back(best_pair);
+    }
+
+    return correspondences;
+}
+
+ICPResult alignPointClouds(
+    const std::vector<Eigen::Vector2d>& source,
+    const std::vector<Eigen::Vector2d>& target,
+    const Transform2D& initial_guess,
+    int max_iterations,
+    double convergence_epsilon,
+    double correspondence_distance)
+{
+    ICPResult result;
+    result.transform = initial_guess;
+    result.iterations = 0;
+    result.final_error = 0.0;
+    result.converged = false;
+
+    for (int iter = 0; iter < max_iterations; ++iter)
+    {
+        //1: Apply current transform
+        std::vector<Eigen::Vector2d> transformedSource = transformPointCloud(source, result.transform);        
+
+        //2: find correspondences
+        std::vector<CorrespondencePair> correspondences = findCorrespondencesPointToPoint(transformedSource, target, correspondence_distance);
+        if (correspondences.empty()) 
+            break;
+
+        //3: Estimate correction
+        Transform2D correction = estimateTransform(correspondences);
+
+        //4: Update transform
+        result.transform.rotation = correction.rotation * result.transform.rotation;
+        result.transform.translation = correction.rotation * result.transform.translation + correction.translation;
+
+        //5: Compute error
+        double total_error = 0.0;
+        for (const CorrespondencePair& pair : correspondences) {
+            Eigen::Vector2d diff = pair.source - pair.target;
+            total_error += diff.squaredNorm(); 
+        }
+        result.final_error = total_error / correspondences.size();
+
+        //6: Check convergence based on transformation change
+        double translation_change = correction.translation.norm();
+        double rotation_change = std::abs(std::atan2(correction.rotation(1, 0), correction.rotation(0, 0))); //extracts rotation angle
+        double transform_change = translation_change + rotation_change;
+
+        result.iterations = iter + 1;
+
+        if (transform_change < convergence_epsilon) {
+            result.converged = true;
+            break;
+        }
+    }
+
+    return result;
 }
 
 } // namespace slam
