@@ -93,6 +93,21 @@ target_include_directories(test_icp_full
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+add_executable(test_scan_conversion
+    tests/test_scan_conversion.cpp
+    src/lidar_processor.cpp
+)
+
+target_link_libraries(test_scan_conversion
+    PRIVATE
+    Eigen3::Eigen
+)
+
+target_include_directories(test_scan_conversion
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
 # Print configuration
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")

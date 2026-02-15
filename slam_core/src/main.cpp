@@ -2,6 +2,7 @@
 #include "odometry.h"
 #include "lidar_processor.h"
 #include "occupancy_grid.h"
+#include "icp_matcher.h"
 #include "types.h"
 #include <iostream>
 #include <csignal>
@@ -71,6 +72,64 @@ std::vector<double> extractDoubleArray(const std::string& json, const std::strin
     return result;
 }
 
+slam::OdometryData parseOdometryData(const std::string& message) {
+    slam::OdometryData odom;
+    
+    size_t header_pos = message.find("\"header\"");
+    if (header_pos != std::string::npos) {
+        odom.timestamp = extractDouble(message, "timestamp");
+    }
+    
+    size_t odom_pos = message.find("\"odometry\"");
+    if (odom_pos != std::string::npos) {
+        odom.left_encoder = extractDouble(message, "left_encoder");
+        odom.right_encoder = extractDouble(message, "right_encoder");
+        odom.gyro_z = extractDouble(message, "imu_gyro_z");
+        odom.compass_heading = extractDouble(message, "compass_heading");
+    }
+    
+    return odom;
+}
+
+slam::LidarScan parseLidarScan(const std::string& message, double timestamp) {
+    slam::LidarScan scan;
+    
+    size_t lidar_pos = message.find("\"lidar\"");
+    if (lidar_pos != std::string::npos) {
+        scan.timestamp = timestamp;
+        scan.count = extractInt(message, "count");
+        scan.angle_min = extractDouble(message, "angle_min");
+        scan.angle_max = extractDouble(message, "angle_max");
+        scan.range_min = extractDouble(message, "range_min");
+        scan.range_max = extractDouble(message, "range_max");
+        scan.ranges = extractDoubleArray(message, "ranges");
+    }
+    
+    return scan;
+}
+
+std::string createVisualizationMessage(
+    const std::vector<slam::Pose2D>& trajectory,
+    const std::vector<std::pair<slam::Point2D, double>>& occupied_cells) {
+    
+    std::ostringstream viz_data;
+    viz_data << "{\"trajectory\": [";
+    for (size_t i = 0; i < trajectory.size(); i++) {
+        if (i > 0) viz_data << ",";
+        viz_data << "{\"x\":" << trajectory[i].x << ",\"y\":" << trajectory[i].y << "}";
+    }
+    viz_data << "],\"grid_cells\":[";
+    for (size_t i = 0; i < occupied_cells.size(); i++) {
+        if (i > 0) viz_data << ",";
+        viz_data << "{\"x\":" << occupied_cells[i].first.x 
+                 << ",\"y\":" << occupied_cells[i].first.y 
+                 << ",\"p\":" << occupied_cells[i].second << "}";
+    }
+    viz_data << "]}";
+    
+    return viz_data.str();
+}
+
 ///////
 
 int main(int /*argc*/, char* /*argv*/[]) {
@@ -94,6 +153,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
         constexpr double occupied_threshold = 0.65;
         
         std::vector<slam::Pose2D> trajectory;
+        slam::Pose2D prev_pose = {0.0, 0.0, 0.0};
         
         subscriber.subscribe("robot_state");
         std::cout << "[Main] Waiting for messages... (Press Ctrl+C to exit)" << std::endl;
@@ -105,39 +165,13 @@ int main(int /*argc*/, char* /*argv*/[]) {
         {
             message_count++;
             
-            // Parse odometry data from JSON
-            slam::OdometryData odom;
-            
             try {
-                // Extract timestamp 
-                size_t header_pos = message.find("\"header\"");
-                if (header_pos != std::string::npos) {
-                    odom.timestamp = extractDouble(message, "timestamp");
-                }
-                
-                // Extract odometry values
-                size_t odom_pos = message.find("\"odometry\"");
-                if (odom_pos != std::string::npos) {
-                    odom.left_encoder = extractDouble(message, "left_encoder");
-                    odom.right_encoder = extractDouble(message, "right_encoder");
-                    odom.gyro_z = extractDouble(message, "imu_gyro_z");
-                    odom.compass_heading = extractDouble(message, "compass_heading");
-                }
-                
+                slam::OdometryData odom = parseOdometryData(message);
                 slam::Pose2D pose = odometry.update(odom);
                 trajectory.push_back(pose);
                 
-                slam::LidarScan scan;
-                size_t lidar_pos = message.find("\"lidar\"");
-                if (lidar_pos != std::string::npos) {
-                    scan.timestamp = odom.timestamp;
-                    scan.count = extractInt(message, "count");
-                    scan.angle_min = extractDouble(message, "angle_min");
-                    scan.angle_max = extractDouble(message, "angle_max");
-                    scan.range_min = extractDouble(message, "range_min");
-                    scan.range_max = extractDouble(message, "range_max");
-                    scan.ranges = extractDoubleArray(message, "ranges");
-                    
+                slam::LidarScan scan = parseLidarScan(message, odom.timestamp);
+                if (!scan.ranges.empty()) {
                     grid.updateWithScan(scan, pose);
                 }
                 
@@ -150,22 +184,8 @@ int main(int /*argc*/, char* /*argv*/[]) {
                               << " | Trajectory: " << trajectory.size()
                               << " | Occupied Cells: " << occupied_cells.size() << std::endl;
                     
-                    std::ostringstream viz_data;
-                    viz_data << "{\"trajectory\": [";
-                    for (size_t i = 0; i < trajectory.size(); i++) {
-                        if (i > 0) viz_data << ",";
-                        viz_data << "{\"x\":" << trajectory[i].x << ",\"y\":" << trajectory[i].y << "}";
-                    }
-                    viz_data << "],\"grid_cells\":[";
-                    for (size_t i = 0; i < occupied_cells.size(); i++) {
-                        if (i > 0) viz_data << ",";
-                        viz_data << "{\"x\":" << occupied_cells[i].first.x 
-                                 << ",\"y\":" << occupied_cells[i].first.y 
-                                 << ",\"p\":" << occupied_cells[i].second << "}";
-                    }
-                    viz_data << "]}";
-                    
-                    publisher.publishMessage("visualization", viz_data.str());
+                    std::string viz_message = createVisualizationMessage(trajectory, occupied_cells);
+                    publisher.publishMessage("visualization", viz_message);
                 }
                 
             } catch (const std::exception& e) {

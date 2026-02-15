@@ -52,4 +52,28 @@ Point2D LidarProcessor::transformPoint(double range, double angle, const Pose2D&
     return world_point;
 }
 
+std::vector<Eigen::Vector2d> LidarProcessor::scanToPointCloud(const LidarScan& scan) {
+    std::vector<Eigen::Vector2d> points;
+
+    int count = 0;
+    double angleIncrement = (scan.angle_max - scan.angle_min) / (scan.count -1);
+    for(double scanRange : scan.ranges)
+    {
+        if (std::isinf(scanRange) || std::isnan(scanRange)) 
+            continue;
+        if( scanRange < scan.range_min || scanRange > scan.range_max)
+            continue;   
+
+        double angle = scan.angle_min + count * angleIncrement;
+
+        double x = scanRange * std::cos(angle);
+        double y = scanRange * std::sin(angle);
+
+        points.push_back(Eigen::Vector2d(x,y));
+        count++;
+    }
+
+    return points;
+}
+
 } // namespace slam
