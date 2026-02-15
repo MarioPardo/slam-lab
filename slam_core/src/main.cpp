@@ -110,7 +110,7 @@ slam::LidarScan parseLidarScan(const std::string& message, double timestamp) {
 
 std::string createVisualizationMessage(
     const std::vector<slam::Pose2D>& trajectory,
-    const std::vector<std::pair<slam::Point2D, double>>& occupied_cells) {
+    const std::vector<slam::Point2D>& lidar_points) {
     
     std::ostringstream viz_data;
     viz_data << "{\"trajectory\": [";
@@ -118,12 +118,11 @@ std::string createVisualizationMessage(
         if (i > 0) viz_data << ",";
         viz_data << "{\"x\":" << trajectory[i].x << ",\"y\":" << trajectory[i].y << "}";
     }
-    viz_data << "],\"grid_cells\":[";
-    for (size_t i = 0; i < occupied_cells.size(); i++) {
+    viz_data << "],\"lidar_points\":[";
+    for (size_t i = 0; i < lidar_points.size(); i++) {
         if (i > 0) viz_data << ",";
-        viz_data << "{\"x\":" << occupied_cells[i].first.x 
-                 << ",\"y\":" << occupied_cells[i].first.y 
-                 << ",\"p\":" << occupied_cells[i].second << "}";
+        viz_data << "{\"x\":" << lidar_points[i].x 
+                 << ",\"y\":" << lidar_points[i].y << "}";
     }
     viz_data << "]}";
     
@@ -146,14 +145,20 @@ int main(int /*argc*/, char* /*argv*/[]) {
         // TurtleBot parameters
         // Wheel radius: 33mm = 0.033m
         // Wheelbase: 160mm = 0.16m
+
+        //Set up sensor processors
         slam::OdometryProcessor odometry(0.033, 0.16);
         slam::LidarProcessor lidar;
         
+        //Set up variables tracking robot trajectory etc
         slam::OccupancyGrid grid(0.05, 400, 400, -10.0, -10.0);
         constexpr double occupied_threshold = 0.65;
-        
         std::vector<slam::Pose2D> trajectory;
+
         slam::Pose2D prev_pose = {0.0, 0.0, 0.0};
+        slam::Pose2D prev_odom_estimate = {0,0,0};
+        std::vector<Eigen::Vector2d> prev_point_cloud = {};
+        bool first_scan = true;
         
         subscriber.subscribe("robot_state");
         std::cout << "[Main] Waiting for messages... (Press Ctrl+C to exit)" << std::endl;
@@ -161,30 +166,40 @@ int main(int /*argc*/, char* /*argv*/[]) {
         int message_count = 0;
         
         // Message callback that sends a response
-        auto messageCallback = [&publisher, &odometry, &grid, &trajectory, &message_count, occupied_threshold](const std::string& /*topic*/, const std::string& message) 
+        auto messageCallback = [&publisher, &odometry,&lidar, &grid, &trajectory, &message_count, &first_scan, &prev_pose, &prev_odom_estimate, &prev_point_cloud, occupied_threshold](const std::string& /*topic*/, const std::string& message)
         {
             message_count++;
             
             try {
+                //Parse Message
+                slam::Pose2D curr_pose = {0,0,0};
+
+                //Use Odometry
                 slam::OdometryData odom = parseOdometryData(message);
-                slam::Pose2D pose = odometry.update(odom);
-                trajectory.push_back(pose);
+                slam::Pose2D odom_estimate = odometry.update(odom);
                 
+                // SIMPLE MODE: Use only odometry (no ICP)
+                curr_pose = odom_estimate;
+                
+                //Use Lidar - transform to world frame for visualization
                 slam::LidarScan scan = parseLidarScan(message, odom.timestamp);
-                if (!scan.ranges.empty()) {
-                    grid.updateWithScan(scan, pose);
+                std::vector<slam::Point2D> world_lidar_points;
+                if (!scan.ranges.empty()) 
+                {
+                    world_lidar_points = lidar.transformToWorld(scan, curr_pose);
                 }
+
+                trajectory.push_back(curr_pose);
                 
+                //Create and Send Message to Visualizer
                 if (message_count % 1 == 0) {
-                    auto occupied_cells = grid.getOccupiedWorldPoints(occupied_threshold);
-                    
                     std::cout << "[Main] Message " << message_count 
-                              << " | Pose: (" << pose.x << ", " << pose.y << ", " 
-                              << (pose.theta * 180.0 / M_PI) << "°)"
+                              << " | Pose: (" << curr_pose.x << ", " << curr_pose.y << ", " 
+                              << (curr_pose.theta * 180.0 / M_PI) << "°)"
                               << " | Trajectory: " << trajectory.size()
-                              << " | Occupied Cells: " << occupied_cells.size() << std::endl;
+                              << " | LiDAR Points: " << world_lidar_points.size() << std::endl;
                     
-                    std::string viz_message = createVisualizationMessage(trajectory, occupied_cells);
+                    std::string viz_message = createVisualizationMessage(trajectory, world_lidar_points);
                     publisher.publishMessage("visualization", viz_message);
                 }
                 

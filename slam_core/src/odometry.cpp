@@ -30,6 +30,7 @@ void OdometryProcessor::initialize(const OdometryData& odom, const Pose2D& initi
               << current_pose_.theta << " rad)" << std::endl;
 }
 
+//update the pose given odometry dat
 Pose2D OdometryProcessor::update(const OdometryData& odom)
 {
     if (!initialized_) {
@@ -49,7 +50,6 @@ Pose2D OdometryProcessor::update(const OdometryData& odom)
     
   
     //Update Pose using differential drive kinematics
-    
     if (std::abs(delta_theta) < 1e-6) // Straight motion
     {
 

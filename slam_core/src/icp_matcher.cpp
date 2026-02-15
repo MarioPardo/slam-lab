@@ -109,6 +109,7 @@ ICPResult alignPointClouds(
     result.iterations = 0;
     result.final_error = 0.0;
     result.converged = false;
+    result.correspondence_count = 0;
 
     for (int iter = 0; iter < max_iterations; ++iter)
     {
@@ -117,6 +118,7 @@ ICPResult alignPointClouds(
 
         //2: find correspondences
         std::vector<CorrespondencePair> correspondences = findCorrespondencesPointToPoint(transformedSource, target, correspondence_distance);
+        result.correspondence_count = correspondences.size();
         if (correspondences.empty()) 
             break;
 
@@ -149,6 +151,31 @@ ICPResult alignPointClouds(
     }
 
     return result;
+}
+
+Transform2D computePoseDelta(const Pose2D& from, const Pose2D& to) {
+    double dx = to.x - from.x;
+    double dy = to.y - from.y;
+    double dtheta = to.theta - from.theta;
+    
+    // Rotation from 'from' to 'to'
+    Eigen::Matrix2d R;
+    R << std::cos(dtheta), -std::sin(dtheta),
+         std::sin(dtheta),  std::cos(dtheta);
+    
+    // Translation in GLOBAL frame
+    Eigen::Vector2d t_global(dx, dy);
+    
+    // Transform translation to LOCAL frame of 'from' pose
+    double cos_from = std::cos(from.theta);
+    double sin_from = std::sin(from.theta);
+    Eigen::Matrix2d R_from_inv;
+    R_from_inv << cos_from, sin_from,
+                 -sin_from, cos_from;
+    
+    Eigen::Vector2d t_local = R_from_inv * t_global;
+    
+    return Transform2D(R, t_local);
 }
 
 } // namespace slam

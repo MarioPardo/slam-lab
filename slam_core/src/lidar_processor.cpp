@@ -27,8 +27,8 @@ std::vector<Point2D> LidarProcessor::transformToWorld(const LidarScan& scan, con
         if (range < scan.range_min || range > scan.range_max) 
             continue;
         
-        
-        double angle = scan.angle_min + i * angle_increment;
+        // Webots LiDAR: ranges[0] is leftmost (angle_max), ranges[last] is rightmost (angle_min)
+        double angle = scan.angle_max - i * angle_increment;
         Point2D world_point = transformPoint(range, angle, robot_pose);
         world_points.push_back(world_point);
     }
@@ -55,22 +55,25 @@ Point2D LidarProcessor::transformPoint(double range, double angle, const Pose2D&
 std::vector<Eigen::Vector2d> LidarProcessor::scanToPointCloud(const LidarScan& scan) {
     std::vector<Eigen::Vector2d> points;
 
-    int count = 0;
-    double angleIncrement = (scan.angle_max - scan.angle_min) / (scan.count -1);
-    for(double scanRange : scan.ranges)
+    double angleIncrement = (scan.angle_max - scan.angle_min) / (scan.count - 1);
+    
+    for(size_t i = 0; i < scan.ranges.size(); ++i)
     {
+        double scanRange = scan.ranges[i];
+        
         if (std::isinf(scanRange) || std::isnan(scanRange)) 
             continue;
         if( scanRange < scan.range_min || scanRange > scan.range_max)
             continue;   
 
-        double angle = scan.angle_min + count * angleIncrement;
+        // Webots LiDAR: ranges[0] is leftmost (angle_max), ranges[last] is rightmost (angle_min)
+        // Reverse the angle mapping: start from angle_max and decrement
+        double angle = scan.angle_max - i * angleIncrement;
 
         double x = scanRange * std::cos(angle);
         double y = scanRange * std::sin(angle);
 
         points.push_back(Eigen::Vector2d(x,y));
-        count++;
     }
 
     return points;

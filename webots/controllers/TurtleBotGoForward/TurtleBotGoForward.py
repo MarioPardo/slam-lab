@@ -47,7 +47,6 @@ subscriber.subscribe("response")  # Subscribe to response topic
 
 step_count = 0
 
-
 while robot.step(TIME_STEP) != -1:
     
     key = keyboard.getKey()

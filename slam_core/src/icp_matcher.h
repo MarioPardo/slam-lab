@@ -34,6 +34,7 @@ struct ICPResult {
     int iterations;
     double final_error;
     bool converged;
+    int correspondence_count;
 };
 
 ICPResult alignPointClouds(
@@ -43,6 +44,8 @@ ICPResult alignPointClouds(
     int max_iterations,
     double convergence_epsilon,
     double correspondence_distance);
+
+Transform2D computePoseDelta(const Pose2D& from, const Pose2D& to);
 
 } // namespace slam
 
