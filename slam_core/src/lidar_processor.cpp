@@ -69,6 +69,7 @@ std::vector<Eigen::Vector2d> LidarProcessor::scanToPointCloud(const LidarScan& s
         // Webots LiDAR: ranges[0] is leftmost (angle_max), ranges[last] is rightmost (angle_min)
         // Reverse the angle mapping: start from angle_max and decrement
         double angle = scan.angle_max - i * angleIncrement;
+        angle = angle + M_PI;
 
         double x = scanRange * std::cos(angle);
         double y = scanRange * std::sin(angle);

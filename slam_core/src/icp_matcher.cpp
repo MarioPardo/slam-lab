@@ -93,6 +93,8 @@ std::vector<CorrespondencePair> findCorrespondencesPointToPoint(
             correspondences.push_back(best_pair);
     }
 
+    
+
     return correspondences;
 }
 

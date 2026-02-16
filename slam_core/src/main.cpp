@@ -180,51 +180,56 @@ int main(int /*argc*/, char* /*argv*/[]) {
             try {
         
                 slam::Pose2D curr_odom_pose = {0,0,0};
-                slam::Pose2D curr_icp_pose = {0,0,0};
+                slam::Pose2D curr_icp_pose = {0,0,0}; // This will track the "Fused" (Best) State
 
-                //Use Odometry
+                // 1. Use Odometry
                 slam::OdometryData odom = parseOdometryData(message);
                 slam::Pose2D odom_estimate = odometry.update(odom);
                 curr_odom_pose = odom_estimate;
-                
-                //Use Lidar
+
+                // 2. Use Lidar
                 slam::LidarScan scan = parseLidarScan(message, odom.timestamp);
                 std::vector<slam::Point2D> world_lidar_points;
-                
+
                 if (!scan.ranges.empty()) 
                 {
-                    // Convert scan to robot-frame point cloud for ICP
+                    //get point cloud from robot pov
                     std::vector<Eigen::Vector2d> curr_point_cloud = lidar.scanToPointCloud(scan);
                     
-                    // Run ICP to correct odometry
                     if (!first_scan && !prev_point_cloud.empty())
                     {
-                        // Initial guess from odometry motion
-                        slam::Transform2D initial_guess = computePoseDelta(prev_odom_estimate, odom_estimate);
+                        //initial guess
+                        slam::Transform2D odom_delta = computePoseDelta(odom_estimate, prev_odom_estimate);
                         
-                        // Run ICP
                         slam::ICPResult icp_result = alignPointClouds(
                             prev_point_cloud, 
                             curr_point_cloud, 
-                            initial_guess, 
-                            100,    // max iterations
-                            1e-3,   // convergence threshold
-                            0.2     // correspondence distance
+                            odom_delta, 
+                            100,    
+                            1e-3,  
+                            0.1   
                         );
                         
-                        // Apply ICP correction
-                        curr_icp_pose = prev_icp_pose.transform(icp_result.transform);
-                        
-                        // Print simple diagnostic
-                        double icp_angle = std::atan2(icp_result.transform.rotation(1, 0), icp_result.transform.rotation(0, 0));
-                        std::cout << "[ICP] dx=" << icp_result.transform.translation(0)
-                                  << ", dy=" << icp_result.transform.translation(1)
-                                  << ", dtheta=" << (icp_angle * 180.0 / M_PI) << "°"
-                                  << " | corr=" << icp_result.correspondence_count << std::endl;
+                        // Compare ICP's proposed motion vs Odometry's predicted motion
+                        double dx = icp_result.transform.translation.x() - odom_delta.translation.x();
+                        double dy = icp_result.transform.translation.y() - odom_delta.translation.y();
+                        double icptheta = std::atan2(icp_result.transform.rotation(1,0), icp_result.transform.rotation(0,0));
+                        double odomtheta = std::atan2(odom_delta.rotation(1,0), odom_delta.rotation(0,0));
+                        double dtheta = std::abs(icptheta - odomtheta);
+                        double trans_error = std::sqrt(dx*dx + dy*dy);
+
+                        // Thresholds: e.g., 20cm difference or 10 degrees difference is "too much"
+                        bool is_valid = icp_result.converged && (trans_error < 0.20) && (dtheta < (10.0 * M_PI / 180.0));
+
+                        if (is_valid) {
+                            curr_icp_pose = prev_icp_pose.transform(icp_result.transform);
+                        } else {
+                            curr_icp_pose = prev_icp_pose.transform(odom_delta);
+                        }
                     }
                     else
                     {
-                        // First scan: both start with odometry
+                        // First scan initialization
                         curr_icp_pose = odom_estimate;
                         first_scan = false;
                     }
@@ -232,14 +237,15 @@ int main(int /*argc*/, char* /*argv*/[]) {
                     // Update state for next iteration
                     prev_point_cloud = curr_point_cloud;
                     prev_odom_estimate = odom_estimate;
-                    prev_icp_pose = curr_icp_pose;
+                    prev_icp_pose = curr_icp_pose; 
                     
-                    // Transform scan to world for visualization (using odometry)
+                    // Visualize using the BEST estimate (Fused)
                     world_lidar_points = lidar.transformToWorld(scan, curr_odom_pose);
                 }
 
-                odom_trajectory.push_back(curr_odom_pose);
-                icp_trajectory.push_back(curr_icp_pose);
+                // Store history
+                odom_trajectory.push_back(curr_odom_pose); // Pure Odom
+                icp_trajectory.push_back(curr_icp_pose);   // Odom + ICP corrections
                 
                 //Create and Send Message to Visualizer
                 if (message_count % 1 == 0) {
