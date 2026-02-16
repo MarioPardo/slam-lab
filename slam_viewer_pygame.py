@@ -42,15 +42,19 @@ class SLAMViewer:
         self.COLOR_ODOM_TRAJ = (0, 100, 255)  # Blue
         self.COLOR_ICP_TRAJ = (0, 255, 100)  # Green
         self.COLOR_CURRENT_SCAN = (255, 50, 50)  # Red
+        self.COLOR_LINES = (255, 200, 0)  # Yellow/Orange (extracted line features)
         self.COLOR_TEXT = (255, 255, 255)  # White
         self.COLOR_GRID = (40, 40, 40)  # Very dark gray
         
         # Data storage
         self.odom_trajectory = []  # List of (x, y) in world coords
         self.icp_trajectory = []   # List of (x, y) in world coords
+        self.odom_poses = []       # List of (x, y, theta) for drawing axes
+        self.icp_poses = []        # List of (x, y, theta) for drawing axes
         self.current_scan = []     # List of (x, y) in world coords (most recent scan)
         self.all_lidar_points = [] # ALL lidar points ever received (occupancy grid style)
         self.global_map = []       # Historical lidar points (keyframes only)
+        self.extracted_lines = []  # List of line segments [(x1, y1, x2, y2), ...]
         
         # Keyframe logic
         self.last_keyframe_x = 0.0
@@ -124,7 +128,7 @@ class SLAMViewer:
         return (dist > self.keyframe_dist_threshold or 
                 angle_diff > self.keyframe_angle_threshold)
     
-    def update_data(self, odom_traj, icp_traj, lidar_points):
+    def update_data(self, odom_traj, icp_traj, lidar_points, extracted_lines=None):
         """
         Update visualization data from SLAM system
         
@@ -132,6 +136,7 @@ class SLAMViewer:
             odom_traj: List of dicts with 'x', 'y' keys (odometry trajectory)
             icp_traj: List of dicts with 'x', 'y' keys (ICP trajectory)
             lidar_points: List of dicts with 'x', 'y' keys (current scan in world frame)
+            extracted_lines: List of line segments, each as dict with 'start' and 'end' points
         """
         self.message_count += 1
         
@@ -139,11 +144,33 @@ class SLAMViewer:
         self.odom_trajectory = [(p['x'], p['y']) for p in odom_traj]
         self.icp_trajectory = [(p['x'], p['y']) for p in icp_traj]
         
+        # Update poses with orientation
+        self.odom_poses = [(p['x'], p['y'], p.get('theta', 0)) for p in odom_traj]
+        self.icp_poses = [(p['x'], p['y'], p.get('theta', 0)) for p in icp_traj]
+        
         # Update current scan (most recent)
         self.current_scan = [(p['x'], p['y']) for p in lidar_points]
         
         # Accumulate ALL lidar points (occupancy grid style)
         self.all_lidar_points.extend(self.current_scan)
+        
+        # Update extracted lines
+        if extracted_lines:
+            self.extracted_lines = []
+            for line in extracted_lines:
+                # Handle dict format with 'start' and 'end' keys
+                if isinstance(line, dict):
+                    start = line.get('start', {'x': 0, 'y': 0})
+                    end = line.get('end', {'x': 0, 'y': 0})
+                    # Convert to (x1, y1, x2, y2) tuple
+                    self.extracted_lines.append((
+                        start.get('x', start[0] if isinstance(start, (list, tuple)) else 0),
+                        start.get('y', start[1] if isinstance(start, (list, tuple)) else 0),
+                        end.get('x', end[0] if isinstance(end, (list, tuple)) else 0),
+                        end.get('y', end[1] if isinstance(end, (list, tuple)) else 0)
+                    ))
+                elif isinstance(line, (list, tuple)) and len(line) >= 4:
+                    self.extracted_lines.append((line[0], line[1], line[2], line[3]))
         
         # Limit total lidar points to prevent memory issues
         max_total_points = 100000  # 100k points max
@@ -226,6 +253,64 @@ class SLAMViewer:
             if 0 <= screen_x < self.width and 0 <= screen_y < self.height:
                 pygame.draw.circle(self.screen, color, (screen_x, screen_y), radius)
     
+    def draw_lines(self, lines, color, thickness=3):
+        """Draw line segments extracted from point cloud
+        
+        Args:
+            lines: List of line segments, each as (x1, y1, x2, y2) tuple
+            color: RGB color tuple
+            thickness: Line thickness in pixels
+        """
+        for line in lines:
+            if len(line) >= 4:
+                x1, y1, x2, y2 = line[0], line[1], line[2], line[3]
+                
+                # Convert to screen coordinates
+                screen_start = self.world_to_screen(x1, y1)
+                screen_end = self.world_to_screen(x2, y2)
+                
+                # Draw the line
+                pygame.draw.line(self.screen, color, screen_start, screen_end, thickness)
+                
+                # Optionally draw circles at endpoints for visibility
+                pygame.draw.circle(self.screen, color, screen_start, thickness + 1)
+                pygame.draw.circle(self.screen, color, screen_end, thickness + 1)
+    
+    def draw_robot_axes(self, x, y, theta, axis_length=0.3, x_color=(255, 0, 0), y_color=(0, 255, 0), thickness=2):
+        """Draw robot coordinate frame as L-shape axes
+        
+        Args:
+            x, y: Robot position in world coordinates
+            theta: Robot orientation in radians
+            axis_length: Length of axes in meters
+            x_color: Color for X-axis (forward, red by default)
+            y_color: Color for Y-axis (left, green by default)
+            thickness: Line thickness in pixels
+        """
+        # Calculate X-axis endpoint (forward direction)
+        x_end = x + axis_length * math.cos(theta)
+        y_end = y + axis_length * math.sin(theta)
+        
+        # Calculate Y-axis endpoint (left direction, 90° counterclockwise from X)
+        y_axis_angle = theta + math.pi / 2
+        y_axis_x_end = x + axis_length * math.cos(y_axis_angle)
+        y_axis_y_end = y + axis_length * math.sin(y_axis_angle)
+        
+        # Convert to screen coordinates
+        screen_origin = self.world_to_screen(x, y)
+        screen_x_end = self.world_to_screen(x_end, y_end)
+        screen_y_end = self.world_to_screen(y_axis_x_end, y_axis_y_end)
+        
+        # Draw X-axis (red, forward)
+        pygame.draw.line(self.screen, x_color, screen_origin, screen_x_end, thickness)
+        # Draw arrowhead for X-axis
+        pygame.draw.circle(self.screen, x_color, screen_x_end, thickness + 2)
+        
+        # Draw Y-axis (green, left)
+        pygame.draw.line(self.screen, y_color, screen_origin, screen_y_end, thickness)
+        # Draw arrowhead for Y-axis
+        pygame.draw.circle(self.screen, y_color, screen_y_end, thickness + 2)
+    
     def draw_stats(self):
         """Draw statistics overlay"""
         stats = [
@@ -236,6 +321,7 @@ class SLAMViewer:
             f"All lidar pts: {len(self.all_lidar_points)}",
             f"Map points: {len(self.global_map)}",
             f"Scan points: {len(self.current_scan)}",
+            f"Lines: {len(self.extracted_lines)}",
             f"Scale: {self.scale:.1f} px/m",
             "",
             "Controls:",
@@ -264,11 +350,12 @@ class SLAMViewer:
             y += 20
         
         # Draw legend at bottom
-        legend_y = self.height - 80
+        legend_y = self.height - 100
         legend_items = [
             ("Odometry (Blue)", self.COLOR_ODOM_TRAJ),
             ("ICP Corrected (Green)", self.COLOR_ICP_TRAJ),
             ("Current Scan (Red)", self.COLOR_CURRENT_SCAN),
+            ("Extracted Lines (Yellow)", self.COLOR_LINES),
             ("Occupancy Grid (Dark Gray)", self.COLOR_ALL_LIDAR)
         ]
         
@@ -300,10 +387,26 @@ class SLAMViewer:
         # Layer 6: ICP Trajectory (Green)
         self.draw_trajectory(self.icp_trajectory, self.COLOR_ICP_TRAJ, thickness=3)
         
-        # Layer 7: Current Scan (Red, on top)
+        # Layer 7: Current Scan (Red)
         self.draw_points(self.current_scan, self.COLOR_CURRENT_SCAN, radius=3)
         
-        # Layer 8: Stats overlay
+        # Layer 8: Extracted Line Features (Yellow/Orange, on top of points)
+        self.draw_lines(self.extracted_lines, self.COLOR_LINES, thickness=3)
+        
+        # Layer 9: Robot coordinate axes
+        # Draw odometry axes (lighter colors)
+        if len(self.odom_poses) > 0:
+            x, y, theta = self.odom_poses[-1]
+            self.draw_robot_axes(x, y, theta, axis_length=0.3, 
+                               x_color=(150, 100, 255), y_color=(100, 150, 255), thickness=2)
+        
+        # Draw ICP axes (brighter colors, slightly larger)
+        if len(self.icp_poses) > 0:
+            x, y, theta = self.icp_poses[-1]
+            self.draw_robot_axes(x, y, theta, axis_length=0.35, 
+                               x_color=(255, 0, 0), y_color=(0, 255, 0), thickness=3)
+        
+        # Layer 10: Stats overlay
         self.draw_stats()
         
         # Update display
@@ -420,9 +523,10 @@ def main():
             odom_traj = data.get('odom_trajectory', [])
             icp_traj = data.get('icp_trajectory', [])
             lidar_points = data.get('lidar_points', [])
+            extracted_lines = data.get('extracted_lines', None)
             
             # Update viewer
-            viewer.update_data(odom_traj, icp_traj, lidar_points)
+            viewer.update_data(odom_traj, icp_traj, lidar_points, extracted_lines)
             last_data_time = frame_count
             
         except zmq.Again:

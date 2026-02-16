@@ -30,6 +30,7 @@ set(SOURCES
     src/lidar_processor.cpp
     src/occupancy_grid.cpp
     src/icp_matcher.cpp
+    src/feature_extractor.cpp
 )
 
 
@@ -38,6 +39,7 @@ set(HEADERS
     src/odometry.h
     src/lidar_processor.h
     src/icp_matcher.h
+    src/feature_extractor.h
     src/types.h
 )
 

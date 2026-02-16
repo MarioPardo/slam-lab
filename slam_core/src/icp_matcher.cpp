@@ -45,6 +45,15 @@ Transform2D estimateTransform(const std::vector<CorrespondencePair>& corresponde
 
     //Get Results
     Eigen::Matrix2d RotationMatrix = V*U.transpose();
+    
+    // Ensure we have a proper rotation (det = 1) not a reflection (det = -1)
+    if (RotationMatrix.determinant() < 0) {
+        // Flip the sign of the second column of V
+        V(0, 1) = -V(0, 1);
+        V(1, 1) = -V(1, 1);
+        RotationMatrix = V * U.transpose();
+    }
+    
     Eigen::Vector2d TranslationVector = Y0 - RotationMatrix*X0;
     
     
@@ -93,7 +102,7 @@ std::vector<CorrespondencePair> findCorrespondencesPointToPoint(
             correspondences.push_back(best_pair);
     }
 
-    
+
 
     return correspondences;
 }
