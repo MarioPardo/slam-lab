@@ -109,14 +109,20 @@ slam::LidarScan parseLidarScan(const std::string& message, double timestamp) {
 }
 
 std::string createVisualizationMessage(
-    const std::vector<slam::Pose2D>& trajectory,
+    const std::vector<slam::Pose2D>& odom_trajectory,
+    const std::vector<slam::Pose2D>& icp_trajectory,
     const std::vector<slam::Point2D>& lidar_points) {
     
     std::ostringstream viz_data;
-    viz_data << "{\"trajectory\": [";
-    for (size_t i = 0; i < trajectory.size(); i++) {
+    viz_data << "{\"odom_trajectory\": [";
+    for (size_t i = 0; i < odom_trajectory.size(); i++) {
         if (i > 0) viz_data << ",";
-        viz_data << "{\"x\":" << trajectory[i].x << ",\"y\":" << trajectory[i].y << "}";
+        viz_data << "{\"x\":" << odom_trajectory[i].x << ",\"y\":" << odom_trajectory[i].y << "}";
+    }
+    viz_data << "],\"icp_trajectory\":[";
+    for (size_t i = 0; i < icp_trajectory.size(); i++) {
+        if (i > 0) viz_data << ",";
+        viz_data << "{\"x\":" << icp_trajectory[i].x << ",\"y\":" << icp_trajectory[i].y << "}";
     }
     viz_data << "],\"lidar_points\":[";
     for (size_t i = 0; i < lidar_points.size(); i++) {
@@ -153,9 +159,10 @@ int main(int /*argc*/, char* /*argv*/[]) {
         //Set up variables tracking robot trajectory etc
         slam::OccupancyGrid grid(0.05, 400, 400, -10.0, -10.0);
         constexpr double occupied_threshold = 0.65;
-        std::vector<slam::Pose2D> trajectory;
+        std::vector<slam::Pose2D> odom_trajectory;   // Odometry-only trajectory
+        std::vector<slam::Pose2D> icp_trajectory;    // ICP-corrected trajectory
 
-        slam::Pose2D prev_pose = {0.0, 0.0, 0.0};
+        slam::Pose2D prev_icp_pose = {0.0, 0.0, 0.0};
         slam::Pose2D prev_odom_estimate = {0,0,0};
         std::vector<Eigen::Vector2d> prev_point_cloud = {};
         bool first_scan = true;
@@ -166,40 +173,84 @@ int main(int /*argc*/, char* /*argv*/[]) {
         int message_count = 0;
         
         // Message callback that sends a response
-        auto messageCallback = [&publisher, &odometry,&lidar, &grid, &trajectory, &message_count, &first_scan, &prev_pose, &prev_odom_estimate, &prev_point_cloud, occupied_threshold](const std::string& /*topic*/, const std::string& message)
+        auto messageCallback = [&publisher, &odometry,&lidar, &grid, &odom_trajectory, &icp_trajectory, &message_count, &first_scan, &prev_icp_pose, &prev_odom_estimate, &prev_point_cloud, occupied_threshold](const std::string& /*topic*/, const std::string& message)
         {
             message_count++;
             
             try {
-                //Parse Message
-                slam::Pose2D curr_pose = {0,0,0};
+        
+                slam::Pose2D curr_odom_pose = {0,0,0};
+                slam::Pose2D curr_icp_pose = {0,0,0};
 
                 //Use Odometry
                 slam::OdometryData odom = parseOdometryData(message);
                 slam::Pose2D odom_estimate = odometry.update(odom);
+                curr_odom_pose = odom_estimate;
                 
-                // SIMPLE MODE: Use only odometry (no ICP)
-                curr_pose = odom_estimate;
-                
-                //Use Lidar - transform to world frame for visualization
+                //Use Lidar
                 slam::LidarScan scan = parseLidarScan(message, odom.timestamp);
                 std::vector<slam::Point2D> world_lidar_points;
+                
                 if (!scan.ranges.empty()) 
                 {
-                    world_lidar_points = lidar.transformToWorld(scan, curr_pose);
+                    // Convert scan to robot-frame point cloud for ICP
+                    std::vector<Eigen::Vector2d> curr_point_cloud = lidar.scanToPointCloud(scan);
+                    
+                    // Run ICP to correct odometry
+                    if (!first_scan && !prev_point_cloud.empty())
+                    {
+                        // Initial guess from odometry motion
+                        slam::Transform2D initial_guess = computePoseDelta(prev_odom_estimate, odom_estimate);
+                        
+                        // Run ICP
+                        slam::ICPResult icp_result = alignPointClouds(
+                            prev_point_cloud, 
+                            curr_point_cloud, 
+                            initial_guess, 
+                            100,    // max iterations
+                            1e-3,   // convergence threshold
+                            0.2     // correspondence distance
+                        );
+                        
+                        // Apply ICP correction
+                        curr_icp_pose = prev_icp_pose.transform(icp_result.transform);
+                        
+                        // Print simple diagnostic
+                        double icp_angle = std::atan2(icp_result.transform.rotation(1, 0), icp_result.transform.rotation(0, 0));
+                        std::cout << "[ICP] dx=" << icp_result.transform.translation(0)
+                                  << ", dy=" << icp_result.transform.translation(1)
+                                  << ", dtheta=" << (icp_angle * 180.0 / M_PI) << "°"
+                                  << " | corr=" << icp_result.correspondence_count << std::endl;
+                    }
+                    else
+                    {
+                        // First scan: both start with odometry
+                        curr_icp_pose = odom_estimate;
+                        first_scan = false;
+                    }
+                    
+                    // Update state for next iteration
+                    prev_point_cloud = curr_point_cloud;
+                    prev_odom_estimate = odom_estimate;
+                    prev_icp_pose = curr_icp_pose;
+                    
+                    // Transform scan to world for visualization (using odometry)
+                    world_lidar_points = lidar.transformToWorld(scan, curr_odom_pose);
                 }
 
-                trajectory.push_back(curr_pose);
+                odom_trajectory.push_back(curr_odom_pose);
+                icp_trajectory.push_back(curr_icp_pose);
                 
                 //Create and Send Message to Visualizer
                 if (message_count % 1 == 0) {
                     std::cout << "[Main] Message " << message_count 
-                              << " | Pose: (" << curr_pose.x << ", " << curr_pose.y << ", " 
-                              << (curr_pose.theta * 180.0 / M_PI) << "°)"
-                              << " | Trajectory: " << trajectory.size()
-                              << " | LiDAR Points: " << world_lidar_points.size() << std::endl;
+                              << " | Odom: (" << curr_odom_pose.x << ", " << curr_odom_pose.y << ", " 
+                              << (curr_odom_pose.theta * 180.0 / M_PI) << "°)"
+                              << " | ICP: (" << curr_icp_pose.x << ", " << curr_icp_pose.y << ", "
+                              << (curr_icp_pose.theta * 180.0 / M_PI) << "°)"
+                              << " | Points: " << world_lidar_points.size() << std::endl;
                     
-                    std::string viz_message = createVisualizationMessage(trajectory, world_lidar_points);
+                    std::string viz_message = createVisualizationMessage(odom_trajectory, icp_trajectory, world_lidar_points);
                     publisher.publishMessage("visualization", viz_message);
                 }
                 
