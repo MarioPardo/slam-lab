@@ -84,8 +84,22 @@ struct Point2D {
     Point2D(double x_, double y_) : x(x_), y(y_) {}
 };
 
+struct Node {
+    int id;
+    double timestamp;
+    Pose2D pose;
+    LidarScan lidar_scan;
+};
+
+struct Edge{
+    int from_id;
+    int to_id;
+    Transform2D transform;
+};
 
 
-} // namespace slam
+}
 
+
+// namespace slam
 #endif // SLAM_TYPES_H

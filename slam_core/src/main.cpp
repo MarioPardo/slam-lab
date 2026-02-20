@@ -5,6 +5,7 @@
 #include "icp_matcher.h"
 #include "feature_extractor.h"
 #include "types.h"
+#include "PoseGraph.h"
 #include <iostream>
 #include <csignal>
 #include <sstream>
@@ -114,7 +115,9 @@ std::string createVisualizationMessage(
     const std::vector<slam::Pose2D>& odom_trajectory,
     const std::vector<slam::Pose2D>& icp_trajectory,
     const std::vector<slam::Point2D>& lidar_points,
-    const std::vector<slam::LineSegment>& extracted_lines) {
+    const std::vector<slam::LineSegment>& extracted_lines,
+    const std::vector<slam::Node>& graph_nodes,
+    const std::vector<slam::Edge>& graph_edges) {
     
     std::ostringstream viz_data;
     viz_data << "{\"odom_trajectory\": [";
@@ -143,7 +146,20 @@ std::string createVisualizationMessage(
                  << "},\"end\":{\"x\":" << extracted_lines[i].end.x()
                  << ",\"y\":" << extracted_lines[i].end.y() << "}}";
     }
-    viz_data << "]}";
+    viz_data << "],\"pose_graph\":{\"nodes\":[";
+    for (size_t i = 0; i < graph_nodes.size(); i++) {
+        if (i > 0) viz_data << ",";
+        viz_data << "{\"id\":" << graph_nodes[i].id
+                 << ",\"x\":"  << graph_nodes[i].pose.x
+                 << ",\"y\":"  << graph_nodes[i].pose.y << "}";
+    }
+    viz_data << "],\"edges\":[";
+    for (size_t i = 0; i < graph_edges.size(); i++) {
+        if (i > 0) viz_data << ",";
+        viz_data << "{\"from\":" << graph_edges[i].from_id
+                 << ",\"to\":"   << graph_edges[i].to_id << "}";
+    }
+    viz_data << "]}}";
     
     return viz_data.str();
 }
@@ -183,6 +199,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
         //Set up sensor processors
         slam::OdometryProcessor odometry(0.033, 0.16);
         slam::LidarProcessor lidar;
+        slam::PoseGraph pose_graph;
         
         // Odom trajectory
         std::vector<slam::Pose2D> odom_trajectory; //keeping for now during development
@@ -204,7 +221,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
         // Message callback: odom map + ICP trajectory side-by-side
         auto messageCallback = [&publisher, &odometry, &lidar, &odom_trajectory, &icp_trajectory,
                                  &message_count, &prev_point_cloud, &prev_odom_pose,
-                                 &prev_icp_pose, &first_scan]
+                                 &prev_icp_pose, &first_scan, &pose_graph]
                                 (const std::string& /*topic*/, const std::string& message)
         {
             message_count++;
@@ -270,8 +287,14 @@ int main(int /*argc*/, char* /*argv*/[]) {
                 odom_trajectory.push_back(curr_odom_pose);
                 icp_trajectory.push_back(curr_icp_pose);
 
-                // 6. Publish: odom map + both trajectories
-                std::string viz_message = createVisualizationMessage(odom_trajectory, icp_trajectory, world_lidar_points, {});
+                // Pose graph keyframing
+                if (!scan.ranges.empty())
+                    pose_graph.tryAddKeyframe(curr_icp_pose, scan, odom.timestamp);
+
+                // Publish: odom map + both trajectories + pose graph
+                std::string viz_message = createVisualizationMessage(
+                    odom_trajectory, icp_trajectory, world_lidar_points, {},
+                    pose_graph.getNodes(), pose_graph.getEdges());
                 publisher.publishMessage("visualization", viz_message);
 
             } catch (const std::exception& e) {

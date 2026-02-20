@@ -31,6 +31,7 @@ set(SOURCES
     src/occupancy_grid.cpp
     src/icp_matcher.cpp
     src/feature_extractor.cpp
+    src/PoseGraph.cpp
 )
 
 
@@ -41,6 +42,7 @@ set(HEADERS
     src/icp_matcher.h
     src/feature_extractor.h
     src/types.h
+    src/PoseGraph.h
 )
 
 

@@ -17,13 +17,23 @@ Phase 1: Data and Constraints []
 
 [X] Phase 3: Scan Matching
 
-    [] Study ICP
+    [X] Study ICP
     Deliverable:
     []Transform function : take in 2 points, output transformation between em
-    []Scan Matcher
+    [X]Scan Matcher
 
-Phase 3: Back End Optimization
+Phase 3: Pose Graph
 
+    [x] Keyframe logic
+    [x] Graph data structure
+    [x] visualize the graph
+
+    
+    Deliverable: Store pose graph + display it on visualization tool
+
+TODO NEXT: Use keyframes we are storing for ICP
+        instead of scan to scan, we want scan to keyframe
+        possibly change our distance thresholds.
     
 Phase 4: Loop Closure
 

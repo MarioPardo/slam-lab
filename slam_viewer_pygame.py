@@ -38,6 +38,8 @@ class SLAMViewer:
         self.C_AXIS_Y_ODOM = (100, 150, 255)
         self.C_AXIS_X_ICP  = (255, 0,   0)
         self.C_AXIS_Y_ICP  = (0,   255, 0)
+        self.C_GRAPH_EDGE  = (255, 20,  147)  # bright pink
+        self.C_GRAPH_NODE  = (255, 130, 200)  # lighter pink for dots
 
         # Camera
         self.origin_x        = width  // 2
@@ -56,6 +58,10 @@ class SLAMViewer:
         # Full accumulated history – kept only for surface rebuild on zoom/pan
         self.all_lidar_points = []  # [(x,y), ...] half-density, world frame
 
+        # Pose graph
+        self.pose_graph_nodes = []  # [(id, x, y), ...]
+        self.pose_graph_edges = []  # [(from_id, to_id), ...]
+
         # ── Persistent off-screen surfaces ──────────────────────────────
         # grid_surface  – opaque background, rebuilt on zoom/pan
         self.grid_surface = pygame.Surface((width, height))
@@ -68,6 +74,10 @@ class SLAMViewer:
         # traj_surface  – transparent, new trajectory segments painted incrementally
         self.traj_surface = pygame.Surface((width, height), pygame.SRCALPHA)
         self.traj_surface.fill((0, 0, 0, 0))
+
+        # graph_surface – transparent, pose graph nodes + edges painted incrementally
+        self.graph_surface = pygame.Surface((width, height), pygame.SRCALPHA)
+        self.graph_surface.fill((0, 0, 0, 0))
 
         # Set when zoom/pan changes – triggers a full surface rebuild next render
         self._view_dirty = False
@@ -113,6 +123,18 @@ class SLAMViewer:
         self._paint_polyline(self.traj_surface, self.odom_trajectory, self.C_ODOM, 2)
         self._paint_polyline(self.traj_surface, self.icp_trajectory,  self.C_ICP,  3)
 
+    def _rebuild_graph_surface(self):
+        """Full redraw of pose graph onto graph_surface (infrequent)."""
+        self.graph_surface.fill((0, 0, 0, 0))
+        node_pos = {nid: (x, y) for nid, x, y in self.pose_graph_nodes}
+        for from_id, to_id in self.pose_graph_edges:
+            if from_id in node_pos and to_id in node_pos:
+                pygame.draw.line(self.graph_surface, self.C_GRAPH_EDGE,
+                                 self.w2s(*node_pos[from_id]),
+                                 self.w2s(*node_pos[to_id]), 2)
+        for _, x, y in self.pose_graph_nodes:
+            pygame.draw.circle(self.graph_surface, self.C_GRAPH_NODE, self.w2s(x, y), 4)
+
     # ─────────────────────────────────────────
     #  Low-level drawing helpers (surface-agnostic)
     # ─────────────────────────────────────────
@@ -137,7 +159,29 @@ class SLAMViewer:
     # ─────────────────────────────────────────
     #  Data update  (called once per received message)
     # ─────────────────────────────────────────
-    def update_data(self, odom_traj, icp_traj, lidar_points):
+    def _update_graph(self, graph_data):
+        """Incrementally paint any new keyframe nodes/edges onto graph_surface."""
+        new_nodes = [(n['id'], n['x'], n['y']) for n in graph_data.get('nodes', [])]
+        new_edges = [(e['from'], e['to'])       for e in graph_data.get('edges', [])]
+
+        if len(new_nodes) > len(self.pose_graph_nodes):
+            node_pos = {nid: (x, y) for nid, x, y in new_nodes}
+            # Paint only newly added edges
+            for i in range(len(self.pose_graph_edges), len(new_edges)):
+                from_id, to_id = new_edges[i]
+                if from_id in node_pos and to_id in node_pos:
+                    pygame.draw.line(self.graph_surface, self.C_GRAPH_EDGE,
+                                     self.w2s(*node_pos[from_id]),
+                                     self.w2s(*node_pos[to_id]), 2)
+            # Paint only newly added node dots
+            for i in range(len(self.pose_graph_nodes), len(new_nodes)):
+                _, x, y = new_nodes[i]
+                pygame.draw.circle(self.graph_surface, self.C_GRAPH_NODE, self.w2s(x, y), 4)
+
+        self.pose_graph_nodes = new_nodes
+        self.pose_graph_edges = new_edges
+
+    def update_data(self, odom_traj, icp_traj, lidar_points, pose_graph):
         self.message_count += 1
 
         self.odom_trajectory = [(p['x'], p['y']) for p in odom_traj]
@@ -163,6 +207,8 @@ class SLAMViewer:
             pygame.draw.line(self.traj_surface, self.C_ICP,
                              self.w2s(*self.icp_trajectory[-2]),
                              self.w2s(*self.icp_trajectory[-1]), 3)
+
+        self._update_graph(pose_graph)
 
         # Auto-center: follow ICP pose, fall back to odom
         if self.auto_center:
@@ -216,12 +262,14 @@ class SLAMViewer:
             self._rebuild_grid_surface()
             self._rebuild_map_surface()
             self._rebuild_traj_surface()
+            self._rebuild_graph_surface()
             self._view_dirty = False
 
         # Blit pre-rendered layers (effectively O(1) each)
         self.screen.blit(self.grid_surface, (0, 0))
         self.screen.blit(self.map_surface,  (0, 0))
         self.screen.blit(self.traj_surface, (0, 0))
+        self.screen.blit(self.graph_surface, (0, 0))
 
         # Current scan: live red ring, redrawn each frame (~180 pts)
         self._paint_connected(self.screen, self.current_scan, self.C_SCAN)
@@ -322,6 +370,7 @@ def main():
                 latest_data.get('odom_trajectory', []),
                 latest_data.get('icp_trajectory',  []),
                 latest_data.get('lidar_points',     []),
+                latest_data.get('pose_graph',       {'nodes': [], 'edges': []}),
             )
 
         viewer.render(frame)
