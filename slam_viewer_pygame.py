@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-# Made using LLM
 """
 SLAM Pygame Visualization Tool
-Visualizes odometry vs ICP-corrected trajectories and lidar scans
+Optimized: persistent map surface, ZMQ CONFLATE, cached stats, no dead code.
 """
 
 import pygame
@@ -10,540 +9,325 @@ import zmq
 import json
 import math
 import sys
-from collections import deque
+
+# 5 cm² gap threshold for connecting consecutive scan points
+MAP_GAP_SQ    = 0.05 * 0.05
+# Frames between stat text re-renders
+STATS_REFRESH = 15
+
 
 class SLAMViewer:
-    def __init__(self, width=1200, height=900, scale=150.0):
-        """
-        Initialize the SLAM Viewer
-        
-        Args:
-            width: Window width in pixels
-            height: Window height in pixels
-            scale: Pixels per meter (zoom level)
-        """
+    def __init__(self, width=1400, height=1000, scale=50.0):
         pygame.init()
-        
-        # Display setup
-        self.width = width
-        self.height = height
-        self.screen = pygame.display.set_mode((width, height))
+
+        self.width   = width
+        self.height  = height
+        self.scale   = scale
+        self.screen  = pygame.display.set_mode((width, height))
         pygame.display.set_caption("SLAM Viewer - Odometry (Blue) vs ICP (Green)")
-        
-        # Coordinate transformation
-        self.scale = scale  # pixels per meter (150 = 3x more zoom than default)
-        self.origin_x = width // 2  # Center of screen (pixels)
-        self.origin_y = height // 2
-        
+
         # Colors
-        self.COLOR_BG = (0, 0, 0)  # Black
-        self.COLOR_ALL_LIDAR = (60, 60, 60)  # Dark gray (all accumulated lidar)
-        self.COLOR_GLOBAL_MAP = (100, 100, 100)  # Medium gray (keyframes)
-        self.COLOR_ODOM_TRAJ = (0, 100, 255)  # Blue
-        self.COLOR_ICP_TRAJ = (0, 255, 100)  # Green
-        self.COLOR_CURRENT_SCAN = (255, 50, 50)  # Red
-        self.COLOR_LINES = (255, 200, 0)  # Yellow/Orange (extracted line features)
-        self.COLOR_TEXT = (255, 255, 255)  # White
-        self.COLOR_GRID = (40, 40, 40)  # Very dark gray
-        
-        # Data storage
-        self.odom_trajectory = []  # List of (x, y) in world coords
-        self.icp_trajectory = []   # List of (x, y) in world coords
-        self.odom_poses = []       # List of (x, y, theta) for drawing axes
-        self.icp_poses = []        # List of (x, y, theta) for drawing axes
-        self.current_scan = []     # List of (x, y) in world coords (most recent scan)
-        self.all_lidar_points = [] # ALL lidar points ever received (occupancy grid style)
-        self.global_map = []       # Historical lidar points (keyframes only)
-        self.extracted_lines = []  # List of line segments [(x1, y1, x2, y2), ...]
-        
-        # Keyframe logic
-        self.last_keyframe_x = 0.0
-        self.last_keyframe_y = 0.0
-        self.last_keyframe_theta = 0.0
-        self.keyframe_dist_threshold = 0.5  # meters
-        self.keyframe_angle_threshold = math.radians(10)  # radians
-        
-        # Camera pan/zoom
-        self.camera_offset_x = 0  # Additional pan offset
+        self.C_BG          = (0,   0,   0)
+        self.C_GRID        = (40,  40,  40)
+        self.C_MAP         = (60,  60,  60)
+        self.C_ODOM        = (0,   100, 255)
+        self.C_ICP         = (0,   255, 100)
+        self.C_SCAN        = (255, 50,  50)
+        self.C_TEXT        = (255, 255, 255)
+        self.C_AXIS_X_ODOM = (150, 100, 255)
+        self.C_AXIS_Y_ODOM = (100, 150, 255)
+        self.C_AXIS_X_ICP  = (255, 0,   0)
+        self.C_AXIS_Y_ICP  = (0,   255, 0)
+
+        # Camera
+        self.origin_x        = width  // 2
+        self.origin_y        = height // 2
+        self.camera_offset_x = 0
         self.camera_offset_y = 0
-        self.auto_center = True  # Follow robot automatically
-        
-        # Font for text
-        self.font = pygame.font.Font(None, 24)
-        self.small_font = pygame.font.Font(None, 18)
-        
-        # Stats
+        self.auto_center     = True
+
+        # Live data (latest message only)
+        self.odom_trajectory = []   # [(x,y), ...]
+        self.icp_trajectory  = []
+        self.odom_poses      = []   # [(x,y,theta), ...]
+        self.icp_poses       = []
+        self.current_scan    = []   # [(x,y), ...] world frame
+
+        # Full accumulated history – kept only for surface rebuild on zoom/pan
+        self.all_lidar_points = []  # [(x,y), ...] half-density, world frame
+
+        # ── Persistent off-screen surfaces ──────────────────────────────
+        # grid_surface  – opaque background, rebuilt on zoom/pan
+        self.grid_surface = pygame.Surface((width, height))
+        self._rebuild_grid_surface()
+
+        # map_surface   – transparent, new scan points painted incrementally
+        self.map_surface = pygame.Surface((width, height), pygame.SRCALPHA)
+        self.map_surface.fill((0, 0, 0, 0))
+
+        # traj_surface  – transparent, new trajectory segments painted incrementally
+        self.traj_surface = pygame.Surface((width, height), pygame.SRCALPHA)
+        self.traj_surface.fill((0, 0, 0, 0))
+
+        # Set when zoom/pan changes – triggers a full surface rebuild next render
+        self._view_dirty = False
+
+        # Stats text cache
+        self.font          = pygame.font.Font(None, 18)
         self.message_count = 0
-        self.keyframe_count = 0
-        
-    def world_to_screen(self, x, y):
-        """
-        Convert world coordinates (meters) to screen coordinates (pixels)
-        
-        World coords: X=right, Y=forward (standard robotics)
-        Screen coords: X=right, Y=down (pygame standard)
-        
-        Args:
-            x: World X coordinate (meters, positive = right)
-            y: World Y coordinate (meters, positive = forward)
-            
-        Returns:
-            (screen_x, screen_y) tuple in pixels
-        """
-        # Apply scale
-        screen_x = x * self.scale
-        screen_y = -y * self.scale  # Flip Y axis (world Y up -> screen Y down)
-        
-        # Apply origin offset (center of screen)
-        screen_x += self.origin_x + self.camera_offset_x
-        screen_y += self.origin_y + self.camera_offset_y
-        
-        return (int(screen_x), int(screen_y))
-    
-    def screen_to_world(self, screen_x, screen_y):
-        """Convert screen coordinates back to world coordinates (for debugging)"""
-        x = (screen_x - self.origin_x - self.camera_offset_x) / self.scale
-        y = -(screen_y - self.origin_y - self.camera_offset_y) / self.scale
-        return (x, y)
-    
-    def should_add_keyframe(self, x, y, theta=0.0):
-        """
-        Determine if current pose should be added as keyframe
-        
-        Args:
-            x, y: Current position in world coords
-            theta: Current orientation (optional)
-            
-        Returns:
-            bool: True if significant motion since last keyframe
-        """
-        dist = math.sqrt((x - self.last_keyframe_x)**2 + (y - self.last_keyframe_y)**2)
-        angle_diff = abs(theta - self.last_keyframe_theta)
-        
-        # Normalize angle difference to [-pi, pi]
-        while angle_diff > math.pi:
-            angle_diff -= 2 * math.pi
-        angle_diff = abs(angle_diff)
-        
-        return (dist > self.keyframe_dist_threshold or 
-                angle_diff > self.keyframe_angle_threshold)
-    
-    def update_data(self, odom_traj, icp_traj, lidar_points, extracted_lines=None):
-        """
-        Update visualization data from SLAM system
-        
-        Args:
-            odom_traj: List of dicts with 'x', 'y' keys (odometry trajectory)
-            icp_traj: List of dicts with 'x', 'y' keys (ICP trajectory)
-            lidar_points: List of dicts with 'x', 'y' keys (current scan in world frame)
-            extracted_lines: List of line segments, each as dict with 'start' and 'end' points
-        """
-        self.message_count += 1
-        
-        # Update trajectories
-        self.odom_trajectory = [(p['x'], p['y']) for p in odom_traj]
-        self.icp_trajectory = [(p['x'], p['y']) for p in icp_traj]
-        
-        # Update poses with orientation
-        self.odom_poses = [(p['x'], p['y'], p.get('theta', 0)) for p in odom_traj]
-        self.icp_poses = [(p['x'], p['y'], p.get('theta', 0)) for p in icp_traj]
-        
-        # Update current scan (most recent)
-        self.current_scan = [(p['x'], p['y']) for p in lidar_points]
-        
-        # Accumulate ALL lidar points (occupancy grid style)
-        self.all_lidar_points.extend(self.current_scan)
-        
-        # Update extracted lines
-        if extracted_lines:
-            self.extracted_lines = []
-            for line in extracted_lines:
-                # Handle dict format with 'start' and 'end' keys
-                if isinstance(line, dict):
-                    start = line.get('start', {'x': 0, 'y': 0})
-                    end = line.get('end', {'x': 0, 'y': 0})
-                    # Convert to (x1, y1, x2, y2) tuple
-                    self.extracted_lines.append((
-                        start.get('x', start[0] if isinstance(start, (list, tuple)) else 0),
-                        start.get('y', start[1] if isinstance(start, (list, tuple)) else 0),
-                        end.get('x', end[0] if isinstance(end, (list, tuple)) else 0),
-                        end.get('y', end[1] if isinstance(end, (list, tuple)) else 0)
-                    ))
-                elif isinstance(line, (list, tuple)) and len(line) >= 4:
-                    self.extracted_lines.append((line[0], line[1], line[2], line[3]))
-        
-        # Limit total lidar points to prevent memory issues
-        max_total_points = 100000  # 100k points max
-        if len(self.all_lidar_points) > max_total_points:
-            # Remove oldest points
-            self.all_lidar_points = self.all_lidar_points[-max_total_points:]
-        
-        # Auto-center camera on latest odom pose
-        if self.auto_center and len(self.odom_trajectory) > 0:
-            latest_x, latest_y = self.odom_trajectory[-1]
-            # Update camera offset so robot stays at screen center
-            self.camera_offset_x = -int(latest_x * self.scale)
-            self.camera_offset_y =  int(latest_y * self.scale)
-            
-        # Update global map with keyframes
-        if len(self.odom_trajectory) > 0:
-            latest_x, latest_y = self.odom_trajectory[-1]
-            theta = 0.0  # We don't have theta in the data, so use distance only
-            
-            if self.should_add_keyframe(latest_x, latest_y, theta):
-                # Add current scan to global map
-                self.global_map.extend(self.current_scan)
-                
-                # Update keyframe reference
-                self.last_keyframe_x = latest_x
-                self.last_keyframe_y = latest_y
-                self.last_keyframe_theta = theta
-                self.keyframe_count += 1
-                
-                # Limit global map size to prevent memory issues
-                max_map_points = 50000
-                if len(self.global_map) > max_map_points:
-                    self.global_map = self.global_map[-max_map_points:]
-    
-    def draw_grid(self):
-        """Draw a reference grid (1 meter squares)"""
-        # Draw vertical lines
+        self._stats_cache  = []   # list of (Surface, (x, y))
+
+    # ─────────────────────────────────────────
+    #  Coordinate helper
+    # ─────────────────────────────────────────
+    def w2s(self, x, y):
+        """World metres -> screen pixel tuple (int)."""
+        ox = self.origin_x + self.camera_offset_x
+        oy = self.origin_y + self.camera_offset_y
+        return (int(x * self.scale + ox),
+                int(-y * self.scale + oy))
+
+    # ─────────────────────────────────────────
+    #  Off-screen surface builders (called on init + zoom/pan)
+    # ─────────────────────────────────────────
+    def _rebuild_grid_surface(self):
+        self.grid_surface.fill(self.C_BG)
         for i in range(-20, 21):
-            x_world = i * 1.0  # 1 meter spacing
-            x1, y1 = self.world_to_screen(x_world, -20)
-            x2, y2 = self.world_to_screen(x_world, 20)
-            pygame.draw.line(self.screen, self.COLOR_GRID, (x1, y1), (x2, y2), 1)
-        
-        # Draw horizontal lines
-        for i in range(-20, 21):
-            y_world = i * 1.0
-            x1, y1 = self.world_to_screen(-20, y_world)
-            x2, y2 = self.world_to_screen(20, y_world)
-            pygame.draw.line(self.screen, self.COLOR_GRID, (x1, y1), (x2, y2), 1)
-        
-        # Draw axes (thicker)
-        # X-axis (red)
-        x1, y1 = self.world_to_screen(-20, 0)
-        x2, y2 = self.world_to_screen(20, 0)
-        pygame.draw.line(self.screen, (100, 0, 0), (x1, y1), (x2, y2), 2)
-        
-        # Y-axis (green)
-        x1, y1 = self.world_to_screen(0, -20)
-        x2, y2 = self.world_to_screen(0, 20)
-        pygame.draw.line(self.screen, (0, 100, 0), (x1, y1), (x2, y2), 2)
-    
-    def draw_trajectory(self, trajectory, color, thickness=2):
-        """Draw a trajectory as connected line segments"""
-        if len(trajectory) < 2:
-            return
-        
-        points = [self.world_to_screen(x, y) for x, y in trajectory]
-        
-        # Filter out off-screen points to prevent line drawing issues
-        visible_points = [p for p in points if 0 <= p[0] < self.width and 0 <= p[1] < self.height]
-        
-        if len(visible_points) >= 2:
-            pygame.draw.lines(self.screen, color, False, points, thickness)
-    
-    def draw_points(self, points, color, radius=2):
-        """Draw a list of points as circles"""
+            x1, y1 = self.w2s(i, -20);  x2, y2 = self.w2s(i,  20)
+            pygame.draw.line(self.grid_surface, self.C_GRID, (x1,y1), (x2,y2), 1)
+            x1, y1 = self.w2s(-20, i);  x2, y2 = self.w2s( 20, i)
+            pygame.draw.line(self.grid_surface, self.C_GRID, (x1,y1), (x2,y2), 1)
+        pygame.draw.line(self.grid_surface, (100,0,0),
+                         self.w2s(-20,0), self.w2s(20,0), 2)
+        pygame.draw.line(self.grid_surface, (0,100,0),
+                         self.w2s(0,-20), self.w2s(0,20), 2)
+
+    def _rebuild_map_surface(self):
+        """Full redraw of accumulated lidar onto map_surface (infrequent)."""
+        self.map_surface.fill((0, 0, 0, 0))
+        self._paint_connected(self.map_surface, self.all_lidar_points, self.C_MAP)
+
+    def _rebuild_traj_surface(self):
+        """Full redraw of both trajectories onto traj_surface (infrequent)."""
+        self.traj_surface.fill((0, 0, 0, 0))
+        self._paint_polyline(self.traj_surface, self.odom_trajectory, self.C_ODOM, 2)
+        self._paint_polyline(self.traj_surface, self.icp_trajectory,  self.C_ICP,  3)
+
+    # ─────────────────────────────────────────
+    #  Low-level drawing helpers (surface-agnostic)
+    # ─────────────────────────────────────────
+    def _paint_connected(self, surface, points, color):
+        """Draw points onto surface; connect consecutive ones if < 5 cm apart."""
+        prev_s = prev_w = None
         for x, y in points:
-            screen_x, screen_y = self.world_to_screen(x, y)
-            
-            # Only draw if on screen
-            if 0 <= screen_x < self.width and 0 <= screen_y < self.height:
-                pygame.draw.circle(self.screen, color, (screen_x, screen_y), radius)
-    
-    def draw_lines(self, lines, color, thickness=3):
-        """Draw line segments extracted from point cloud
-        
-        Args:
-            lines: List of line segments, each as (x1, y1, x2, y2) tuple
-            color: RGB color tuple
-            thickness: Line thickness in pixels
-        """
-        for line in lines:
-            if len(line) >= 4:
-                x1, y1, x2, y2 = line[0], line[1], line[2], line[3]
-                
-                # Convert to screen coordinates
-                screen_start = self.world_to_screen(x1, y1)
-                screen_end = self.world_to_screen(x2, y2)
-                
-                # Draw the line
-                pygame.draw.line(self.screen, color, screen_start, screen_end, thickness)
-    
-    def draw_robot_axes(self, x, y, theta, axis_length=0.3, x_color=(255, 0, 0), y_color=(0, 255, 0), thickness=2):
-        """Draw robot coordinate frame as L-shape axes
-        
-        Args:
-            x, y: Robot position in world coordinates
-            theta: Robot orientation in radians
-            axis_length: Length of axes in meters
-            x_color: Color for X-axis (forward, red by default)
-            y_color: Color for Y-axis (left, green by default)
-            thickness: Line thickness in pixels
-        """
-        # Calculate X-axis endpoint (forward direction)
-        x_end = x + axis_length * math.cos(theta)
-        y_end = y + axis_length * math.sin(theta)
-        
-        # Calculate Y-axis endpoint (left direction, 90° counterclockwise from X)
-        y_axis_angle = theta + math.pi / 2
-        y_axis_x_end = x + axis_length * math.cos(y_axis_angle)
-        y_axis_y_end = y + axis_length * math.sin(y_axis_angle)
-        
-        # Convert to screen coordinates
-        screen_origin = self.world_to_screen(x, y)
-        screen_x_end = self.world_to_screen(x_end, y_end)
-        screen_y_end = self.world_to_screen(y_axis_x_end, y_axis_y_end)
-        
-        # Draw X-axis (red, forward)
-        pygame.draw.line(self.screen, x_color, screen_origin, screen_x_end, thickness)
-        
-        # Draw Y-axis (green, left)
-        pygame.draw.line(self.screen, y_color, screen_origin, screen_y_end, thickness)
-    
-    def draw_stats(self):
-        """Draw statistics overlay"""
-        stats = [
-            f"Messages: {self.message_count}",
-            f"Keyframes: {self.keyframe_count}",
-            f"Odom points: {len(self.odom_trajectory)}",
-            f"ICP points: {len(self.icp_trajectory)}",
-            f"All lidar pts: {len(self.all_lidar_points)}",
-            f"Map points: {len(self.global_map)}",
-            f"Scan points: {len(self.current_scan)}",
-            f"Lines: {len(self.extracted_lines)}",
-            f"Scale: {self.scale:.1f} px/m",
+            sx, sy = self.w2s(x, y)
+            if prev_w is not None:
+                dx = x - prev_w[0];  dy = y - prev_w[1]
+                if dx*dx + dy*dy < MAP_GAP_SQ:
+                    pygame.draw.line(surface, color, prev_s, (sx, sy), 1)
+            prev_s = (sx, sy)
+            prev_w = (x, y)
+
+    def _paint_polyline(self, surface, traj, color, thickness):
+        if len(traj) < 2:
+            return
+        pygame.draw.lines(surface, color, False,
+                          [self.w2s(x, y) for x, y in traj], thickness)
+
+    # ─────────────────────────────────────────
+    #  Data update  (called once per received message)
+    # ─────────────────────────────────────────
+    def update_data(self, odom_traj, icp_traj, lidar_points):
+        self.message_count += 1
+
+        self.odom_trajectory = [(p['x'], p['y']) for p in odom_traj]
+        self.icp_trajectory  = [(p['x'], p['y']) for p in icp_traj]
+        self.odom_poses      = [(p['x'], p['y'], p.get('theta', 0)) for p in odom_traj]
+        self.icp_poses       = [(p['x'], p['y'], p.get('theta', 0)) for p in icp_traj]
+        self.current_scan    = [(p['x'], p['y']) for p in lidar_points]
+
+        # Paint only NEW half-density map points onto map_surface (O(n_new) not O(n_total))
+        new_pts = self.current_scan[::2]
+        if new_pts:
+            join = ([self.all_lidar_points[-1]] + new_pts
+                    if self.all_lidar_points else new_pts)
+            self._paint_connected(self.map_surface, join, self.C_MAP)
+            self.all_lidar_points.extend(new_pts)
+
+        # Paint only the newest trajectory segment onto traj_surface
+        if len(self.odom_trajectory) >= 2:
+            pygame.draw.line(self.traj_surface, self.C_ODOM,
+                             self.w2s(*self.odom_trajectory[-2]),
+                             self.w2s(*self.odom_trajectory[-1]), 2)
+        if len(self.icp_trajectory) >= 2:
+            pygame.draw.line(self.traj_surface, self.C_ICP,
+                             self.w2s(*self.icp_trajectory[-2]),
+                             self.w2s(*self.icp_trajectory[-1]), 3)
+
+        # Auto-center: follow ICP pose, fall back to odom
+        if self.auto_center:
+            ref = self.icp_trajectory or self.odom_trajectory
+            if ref:
+                lx, ly = ref[-1]
+                new_ox = -int(lx * self.scale)
+                new_oy =  int(ly * self.scale)
+                if new_ox != self.camera_offset_x or new_oy != self.camera_offset_y:
+                    self.camera_offset_x = new_ox
+                    self.camera_offset_y = new_oy
+                    self._view_dirty = True
+
+    # ─────────────────────────────────────────
+    #  Render  (called every frame)
+    # ─────────────────────────────────────────
+    def _draw_robot_axes(self, x, y, theta, length, cx, cy, thick):
+        ox, oy = self.w2s(x, y)
+        ex, ey = self.w2s(x + length * math.cos(theta),
+                          y + length * math.sin(theta))
+        lx, ly = self.w2s(x + length * math.cos(theta + math.pi/2),
+                          y + length * math.sin(theta + math.pi/2))
+        pygame.draw.line(self.screen, cx, (ox, oy), (ex, ey), thick)
+        pygame.draw.line(self.screen, cy, (ox, oy), (lx, ly), thick)
+
+    def _refresh_stats(self):
+        ref = self.icp_trajectory or self.odom_trajectory
+        px, py = ref[-1] if ref else (0.0, 0.0)
+        lines = [
+            f"Messages : {self.message_count}",
+            f"Map pts  : {len(self.all_lidar_points)}",
+            f"Scan pts : {len(self.current_scan)}",
+            f"Scale    : {self.scale:.1f} px/m",
+            f"Pose     : ({px:.2f}, {py:.2f})",
             "",
-            "Controls:",
-            "  +/- : Zoom",
-            "  Arrows: Pan",
-            "  C: Toggle auto-center",
-            "  R: Reset view",
-            "  Q/ESC: Quit"
+            "+/-  Zoom      Arrows  Pan",
+            "C  auto-center    R  reset    Q  quit",
         ]
-        
+        self._stats_cache = []
         y = 10
-        for line in stats:
-            if line:  # Non-empty line
-                text = self.small_font.render(line, True, self.COLOR_TEXT)
-            else:  # Empty line for spacing
-                y += 5
-                continue
-            
-            # Draw background for readability
-            bg_rect = text.get_rect()
-            bg_rect.topleft = (10, y)
-            bg_rect.inflate_ip(4, 2)
-            pygame.draw.rect(self.screen, (0, 0, 0, 128), bg_rect)
-            
-            self.screen.blit(text, (10, y))
-            y += 20
-        
-        # Draw legend at bottom
-        legend_y = self.height - 100
-        legend_items = [
-            ("Odometry (Blue)", self.COLOR_ODOM_TRAJ),
-            ("ICP Corrected (Green)", self.COLOR_ICP_TRAJ),
-            ("Current Scan (Red)", self.COLOR_CURRENT_SCAN),
-            ("Extracted Lines (Yellow)", self.COLOR_LINES),
-            ("Occupancy Grid (Dark Gray)", self.COLOR_ALL_LIDAR)
-        ]
-        
-        for i, (label, color) in enumerate(legend_items):
-            y = legend_y + i * 20
-            # Draw color box
-            pygame.draw.rect(self.screen, color, (10, y, 15, 15))
-            # Draw label
-            text = self.small_font.render(label, True, self.COLOR_TEXT)
-            self.screen.blit(text, (30, y))
-    
-    def render(self):
-        """Render all layers"""
-        # Layer 1: Background
-        self.screen.fill(self.COLOR_BG)
-        
-        # Layer 2: Grid
-        self.draw_grid()
-        
-        # Layer 3: All accumulated lidar points (occupancy grid style - darkest)
-        self.draw_points(self.all_lidar_points, self.COLOR_ALL_LIDAR, radius=1)
-        
-        # Layer 4: Global Map keyframes (medium gray)
-        # self.draw_points(self.global_map, self.COLOR_GLOBAL_MAP, radius=1)
-        
-        # Layer 5: Odometry Trajectory (Blue)
-        self.draw_trajectory(self.odom_trajectory, self.COLOR_ODOM_TRAJ, thickness=2)
-        
-        # Layer 6: ICP Trajectory (Green)
-        self.draw_trajectory(self.icp_trajectory, self.COLOR_ICP_TRAJ, thickness=3)
-        
-        # Layer 7: Current Scan (Red)
-        self.draw_points(self.current_scan, self.COLOR_CURRENT_SCAN, radius=3)
-        
-        # Layer 8: Extracted Line Features (Yellow/Orange, on top of points)
-        self.draw_lines(self.extracted_lines, self.COLOR_LINES, thickness=3)
-        
-        # Layer 9: Robot coordinate axes
-        # Odom pose axes (lighter blue/purple)
-        if len(self.odom_poses) > 0:
-            x, y, theta = self.odom_poses[-1]
-            self.draw_robot_axes(x, y, theta, axis_length=0.3,
-                               x_color=(150, 100, 255), y_color=(100, 150, 255), thickness=2)
-        # ICP pose axes (bright red/green, slightly larger)
-        if len(self.icp_poses) > 0:
-            x, y, theta = self.icp_poses[-1]
-            self.draw_robot_axes(x, y, theta, axis_length=0.35,
-                               x_color=(255, 0, 0), y_color=(0, 255, 0), thickness=3)
-        
-        # Layer 10: Stats overlay
-        self.draw_stats()
-        
-        # Update display
+        for line in lines:
+            if not line:
+                y += 6;  continue
+            surf = self.font.render(line, True, self.C_TEXT)
+            self._stats_cache.append((surf, (10, y)))
+            y += 18
+
+    def render(self, frame: int):
+        # Full rebuild if zoom/pan changed
+        if self._view_dirty:
+            self._rebuild_grid_surface()
+            self._rebuild_map_surface()
+            self._rebuild_traj_surface()
+            self._view_dirty = False
+
+        # Blit pre-rendered layers (effectively O(1) each)
+        self.screen.blit(self.grid_surface, (0, 0))
+        self.screen.blit(self.map_surface,  (0, 0))
+        self.screen.blit(self.traj_surface, (0, 0))
+
+        # Current scan: live red ring, redrawn each frame (~180 pts)
+        self._paint_connected(self.screen, self.current_scan, self.C_SCAN)
+
+        # Robot axes
+        if self.odom_poses:
+            x, y, th = self.odom_poses[-1]
+            self._draw_robot_axes(x, y, th, 0.3,  self.C_AXIS_X_ODOM, self.C_AXIS_Y_ODOM, 2)
+        if self.icp_poses:
+            x, y, th = self.icp_poses[-1]
+            self._draw_robot_axes(x, y, th, 0.35, self.C_AXIS_X_ICP,  self.C_AXIS_Y_ICP,  3)
+
+        # Stats overlay (re-rendered every STATS_REFRESH frames)
+        if frame % STATS_REFRESH == 0:
+            self._refresh_stats()
+        for surf, pos in self._stats_cache:
+            self.screen.blit(surf, pos)
+
         pygame.display.flip()
-    
+
+    # ─────────────────────────────────────────
+    #  Input
+    # ─────────────────────────────────────────
     def handle_input(self):
-        """Handle keyboard and mouse input, return False to quit"""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return False
-            
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_q or event.key == pygame.K_ESCAPE:
+                if event.key in (pygame.K_q, pygame.K_ESCAPE):
                     return False
-                
-                # Zoom in/out
-                elif event.key == pygame.K_EQUALS or event.key == pygame.K_PLUS:
-                    self.scale *= 1.2
-                    print(f"Zoom in: {self.scale:.1f} px/m")
-                
+                elif event.key in (pygame.K_EQUALS, pygame.K_PLUS):
+                    self.scale *= 1.2;  self._view_dirty = True
                 elif event.key == pygame.K_MINUS:
-                    self.scale /= 1.2
-                    print(f"Zoom out: {self.scale:.1f} px/m")
-                
-                # Pan camera
+                    self.scale /= 1.2;  self._view_dirty = True
                 elif event.key == pygame.K_LEFT:
-                    self.camera_offset_x += 50
-                    self.auto_center = False
-                
+                    self.camera_offset_x += 50;  self.auto_center = False;  self._view_dirty = True
                 elif event.key == pygame.K_RIGHT:
-                    self.camera_offset_x -= 50
-                    self.auto_center = False
-                
+                    self.camera_offset_x -= 50;  self.auto_center = False;  self._view_dirty = True
                 elif event.key == pygame.K_UP:
-                    self.camera_offset_y += 50
-                    self.auto_center = False
-                
+                    self.camera_offset_y += 50;  self.auto_center = False;  self._view_dirty = True
                 elif event.key == pygame.K_DOWN:
-                    self.camera_offset_y -= 50
-                    self.auto_center = False
-                
-                # Toggle auto-center
+                    self.camera_offset_y -= 50;  self.auto_center = False;  self._view_dirty = True
                 elif event.key == pygame.K_c:
                     self.auto_center = not self.auto_center
-                    print(f"Auto-center: {self.auto_center}")
-                
-                # Reset view
                 elif event.key == pygame.K_r:
                     self.scale = 50.0
-                    self.camera_offset_x = 0
-                    self.camera_offset_y = 0
-                    self.auto_center = True
-                    print("View reset")
-        
+                    self.camera_offset_x = 0;  self.camera_offset_y = 0
+                    self.auto_center = True;   self._view_dirty = True
         return True
 
 
+# ─────────────────────────────────────────────
+#  Entry point
+# ─────────────────────────────────────────────
 def main():
-    """Main loop: receive ZMQ data and visualize"""
-    print("=== SLAM Pygame Viewer ===")
-    print("Connecting to SLAM core on tcp://localhost:5556...")
-    
-    # Setup ZMQ subscriber
-    context = zmq.Context()
+    print("=== SLAM Pygame Viewer (optimized) ===")
+    print("Connecting to tcp://localhost:5556 ...")
+
+    context    = zmq.Context()
     subscriber = context.socket(zmq.SUB)
+
+    # CONFLATE: only the most-recent message is kept in the ZMQ buffer.
+    # This prevents the viewer falling behind when SLAM publishes faster than we render.
+    subscriber.setsockopt(zmq.CONFLATE, 1)
+
     subscriber.connect("tcp://localhost:5556")
-    subscriber.subscribe(b"visualization")  # Use bytes for topic
-    subscriber.setsockopt(zmq.RCVTIMEO, 100)  # 100ms timeout
-    
-    print(f"ZMQ Socket created and subscribed to 'visualization' topic")
-    
-    # Create viewer
-    viewer = SLAMViewer(width=1400, height=1000, scale=50.0)
-    clock = pygame.time.Clock()
-    
-    print("Viewer running. Press Q or ESC to quit.")
-    print("Waiting for SLAM data...")
-    print("(Make sure slam_subscriber is running in another terminal!)")
-    
-    running = True
-    frame_count = 0
-    last_data_time = 0
-    
-    while running:
-        # Handle input
-        running = viewer.handle_input()
-        
-        # Try to receive data from ZMQ (non-blocking)
-        try:
-            # Receive multipart message [topic, data]
-            msg_parts = subscriber.recv_multipart(flags=zmq.NOBLOCK)
-            
-            # Parse topic and message
-            if len(msg_parts) >= 2:
-                topic = msg_parts[0].decode('utf-8')
-                message = msg_parts[1].decode('utf-8')
-            else:
-                # Fallback: single part with topic prefix
-                full_msg = msg_parts[0].decode('utf-8')
-                parts = full_msg.split(' ', 1)
-                if len(parts) == 2:
-                    topic = parts[0]
-                    message = parts[1]
-                else:
-                    topic = "unknown"
-                    message = full_msg
-            
-            if frame_count % 10 == 0:  # Print every 10th message
-                print(f"Received message #{viewer.message_count + 1} (topic: {topic})")
-            
-            # Parse JSON data
-            data = json.loads(message)
-            
-            odom_traj = data.get('odom_trajectory', [])
-            icp_traj = data.get('icp_trajectory', [])
-            lidar_points = data.get('lidar_points', [])
-            extracted_lines = data.get('extracted_lines', None)
-            
-            # Update viewer
-            viewer.update_data(odom_traj, icp_traj, lidar_points, extracted_lines)
-            last_data_time = frame_count
-            
-        except zmq.Again:
-            # No data available
-            if frame_count % 300 == 0 and frame_count > 0:  # Every 10 seconds at 30fps
-                if frame_count - last_data_time > 300:
-                    print(f"[WARNING] No data received for {(frame_count - last_data_time) // 30} seconds")
-                    print("  Check if slam_subscriber is running and publishing data")
-        except json.JSONDecodeError as e:
-            print(f"JSON decode error: {e}")
-            if 'message' in locals():
-                print(f"Raw message: {message[:200]}...")  # Print first 200 chars
-        except Exception as e:
-            print(f"Error receiving data: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        # Render frame
-        viewer.render()
-        
-        # Cap framerate
-        clock.tick(30)  # 30 FPS
-        frame_count += 1
-    
-    print(f"\nShutting down after {frame_count} frames")
+    subscriber.subscribe(b"visualization")
+
+    viewer = SLAMViewer()
+    clock  = pygame.time.Clock()
+    frame  = 0
+
+    print("Running. Q / ESC to quit.")
+
+    while True:
+        if not viewer.handle_input():
+            break
+
+        # Drain any buffered messages; with CONFLATE there will be at most one,
+        # but drain defensively to always get the very latest.
+        # C++ publishes as a single frame: "topic {json}"  (space-separated)
+        latest_data = None
+        while True:
+            try:
+                msg = subscriber.recv(flags=zmq.NOBLOCK)
+                full = msg.decode('utf-8')
+                space = full.find(' ')
+                if space != -1:
+                    latest_data = json.loads(full[space + 1:])
+            except zmq.Again:
+                break
+            except Exception as e:
+                print(f"[Recv] {e}")
+                break
+
+        if latest_data is not None:
+            viewer.update_data(
+                latest_data.get('odom_trajectory', []),
+                latest_data.get('icp_trajectory',  []),
+                latest_data.get('lidar_points',     []),
+            )
+
+        viewer.render(frame)
+        clock.tick(30)
+        frame += 1
+
     subscriber.close()
     context.term()
     pygame.quit()

@@ -188,7 +188,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
         std::vector<slam::Pose2D> odom_trajectory; //keeping for now during development
         slam::Pose2D prev_odom_pose = {0.0, 0.0, 0.0};
         
-        // ICP trajectory
+        // ICP trajectory.  //TODO implement keyframe to reduce error buildup
         std::vector<slam::Pose2D> icp_trajectory;
         slam::Pose2D prev_icp_pose  = {0.0, 0.0, 0.0};
         std::vector<Eigen::Vector2d> prev_point_cloud;
