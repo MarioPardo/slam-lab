@@ -28,7 +28,7 @@ class SLAMViewer:
         self.width = width
         self.height = height
         self.screen = pygame.display.set_mode((width, height))
-        pygame.display.set_caption("SLAM Viewer - Odometry (Blue) vs ICP (Green)")
+        pygame.display.set_caption("SLAM Viewer - Odometry + Lidar (ICP disabled)")
         
         # Coordinate transformation
         self.scale = scale  # pixels per meter (150 = 3x more zoom than default)
@@ -178,15 +178,16 @@ class SLAMViewer:
             # Remove oldest points
             self.all_lidar_points = self.all_lidar_points[-max_total_points:]
         
-        # Auto-center camera on latest ICP pose
-        if self.auto_center and len(self.icp_trajectory) > 0:
-            latest_x, latest_y = self.icp_trajectory[-1]
-            # Don't update camera offset, just update origin
-            # This keeps the robot roughly centered
+        # Auto-center camera on latest odom pose
+        if self.auto_center and len(self.odom_trajectory) > 0:
+            latest_x, latest_y = self.odom_trajectory[-1]
+            # Update camera offset so robot stays at screen center
+            self.camera_offset_x = -int(latest_x * self.scale)
+            self.camera_offset_y =  int(latest_y * self.scale)
             
         # Update global map with keyframes
-        if len(self.icp_trajectory) > 0:
-            latest_x, latest_y = self.icp_trajectory[-1]
+        if len(self.odom_trajectory) > 0:
+            latest_x, latest_y = self.odom_trajectory[-1]
             theta = 0.0  # We don't have theta in the data, so use distance only
             
             if self.should_add_keyframe(latest_x, latest_y, theta):
@@ -384,8 +385,8 @@ class SLAMViewer:
         # Layer 5: Odometry Trajectory (Blue)
         self.draw_trajectory(self.odom_trajectory, self.COLOR_ODOM_TRAJ, thickness=2)
         
-        # Layer 6: ICP Trajectory (Green)
-        self.draw_trajectory(self.icp_trajectory, self.COLOR_ICP_TRAJ, thickness=3)
+        # Layer 6: ICP Trajectory (Green) - DISABLED
+        # self.draw_trajectory(self.icp_trajectory, self.COLOR_ICP_TRAJ, thickness=3)
         
         # Layer 7: Current Scan (Red)
         self.draw_points(self.current_scan, self.COLOR_CURRENT_SCAN, radius=3)
@@ -394,16 +395,10 @@ class SLAMViewer:
         self.draw_lines(self.extracted_lines, self.COLOR_LINES, thickness=3)
         
         # Layer 9: Robot coordinate axes
-        # Draw odometry axes (lighter colors)
+        # Draw robot axes using odom pose (ICP disabled)
         if len(self.odom_poses) > 0:
             x, y, theta = self.odom_poses[-1]
-            self.draw_robot_axes(x, y, theta, axis_length=0.3, 
-                               x_color=(150, 100, 255), y_color=(100, 150, 255), thickness=2)
-        
-        # Draw ICP axes (brighter colors, slightly larger)
-        if len(self.icp_poses) > 0:
-            x, y, theta = self.icp_poses[-1]
-            self.draw_robot_axes(x, y, theta, axis_length=0.35, 
+            self.draw_robot_axes(x, y, theta, axis_length=0.35,
                                x_color=(255, 0, 0), y_color=(0, 255, 0), thickness=3)
         
         # Layer 10: Stats overlay

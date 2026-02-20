@@ -90,11 +90,13 @@ while robot.step(TIME_STEP) != -1:
     
     # Lidar data
     lidar_ranges = lidar.getRangeImage()
+    lidar_fov = lidar.getFov()  # actual FOV in radians (e.g. 2*pi for 360-degree lidar)
     lidar_data = {
         "count": len(lidar_ranges),
-        #lidar has 90dg fov with straight ahead being at center of fov
-        "angle_min": -(math.pi/4),
-        "angle_max": (math.pi/4),
+        # Use actual lidar FOV so angles are correct regardless of 90 vs 360 degree lidar.
+        # Webots convention: ranges[0] is leftmost (angle_max), ranges[last] is rightmost (angle_min)
+        "angle_min": -(lidar_fov / 2.0),
+        "angle_max":  (lidar_fov / 2.0),
         "range_min": lidar.getMinRange(),
         "range_max": lidar.getMaxRange(),
         "ranges": [float('inf') if r == float('inf') else r for r in lidar_ranges]

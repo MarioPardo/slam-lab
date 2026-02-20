@@ -5,6 +5,6 @@ sceneTreePerspectives: 000000ff00000001000000030000001e000000c0000000fa010000000
 maximizedDockId: -1
 centralWidgetVisible: 1
 orthographicViewHeight: 1
-textFiles: 2 "../../../../../../Applications/Webots.app/Contents/projects/robots/irobot/create/controllers/ground/ground.c" "../../../../../../Applications/Webots.app/Contents/projects/robots/irobot/create/controllers/create_avoid_obstacles/create_avoid_obstacles.c" "controllers/TurtleBotGoForward/TurtleBotGoForward.py"
+textFiles: 0 "../../../../../../Applications/Webots.app/Contents/projects/robots/irobot/create/controllers/ground/ground.c" "../../../../../../Applications/Webots.app/Contents/projects/robots/irobot/create/controllers/create_avoid_obstacles/create_avoid_obstacles.c"
 globalOptionalRendering: CoordinateSystem::LidarRaysPaths::LidarPointClouds
 consoles: Console:All:All

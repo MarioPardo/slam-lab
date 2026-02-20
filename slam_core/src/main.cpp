@@ -10,6 +10,7 @@
 #include <sstream>
 #include <cmath>
 #include <vector>
+#include <limits>
 
 // Global flag for clean shutdown
 volatile sig_atomic_t running = 1;
@@ -182,159 +183,50 @@ int main(int /*argc*/, char* /*argv*/[]) {
         //Set up sensor processors
         slam::OdometryProcessor odometry(0.033, 0.16);
         slam::LidarProcessor lidar;
-        slam::FeatureExtractor feature_extractor;
         
-        //Set up variables tracking robot trajectory etc
-        slam::OccupancyGrid grid(0.05, 400, 400, -10.0, -10.0);
-        constexpr double occupied_threshold = 0.65;
-        std::vector<slam::Pose2D> odom_trajectory;   // Odometry-only trajectory
-        std::vector<slam::Pose2D> icp_trajectory;    // ICP-corrected trajectory
-
-        slam::Pose2D prev_icp_pose = {0.0, 0.0, 0.0};
-        slam::Pose2D prev_odom_estimate = {0,0,0};
-        std::vector<Eigen::Vector2d> prev_point_cloud = {};
-        bool first_scan = true;
+        // Trajectory history
+        std::vector<slam::Pose2D> odom_trajectory;
         
         subscriber.subscribe("robot_state");
         std::cout << "[Main] Waiting for messages... (Press Ctrl+C to exit)" << std::endl;
+        std::cout << "[Main] Mode: Odometry + Lidar visualization (ICP disabled)" << std::endl;
         
         int message_count = 0;
         
-        // Message callback that sends a response
-        auto messageCallback = [&publisher, &odometry,&lidar, &feature_extractor, &grid, &odom_trajectory, &icp_trajectory, &message_count, &first_scan, &prev_icp_pose, &prev_odom_estimate, &prev_point_cloud, occupied_threshold](const std::string& /*topic*/, const std::string& message)
+        // Message callback: odometry + lidar visualization only (ICP disabled)
+        auto messageCallback = [&publisher, &odometry, &lidar, &odom_trajectory, &message_count](const std::string& /*topic*/, const std::string& message)
         {
             message_count++;
             
             try {
-        
-                slam::Pose2D curr_odom_pose = {0,0,0};
-                slam::Pose2D curr_icp_pose = {0,0,0}; // This will track the "Fused" (Best) State
-
-                // 1. Use Odometry
+                // 1. Odometry
                 slam::OdometryData odom = parseOdometryData(message);
-                slam::Pose2D odom_estimate = odometry.update(odom);
-                curr_odom_pose = odom_estimate;
+                slam::Pose2D curr_odom_pose = odometry.update(odom);
 
-                // 2. Use Lidar
+                // 2. Lidar - transform scan to world frame for visualization
                 slam::LidarScan scan = parseLidarScan(message, odom.timestamp);
                 std::vector<slam::Point2D> world_lidar_points;
 
-                if (!scan.ranges.empty()) 
-                {
-                    //get point cloud from robot pov
-                    std::vector<Eigen::Vector2d> curr_point_cloud = lidar.scanToPointCloud(scan);
-
-                    std::vector<slam::LineSegment> curr_lines = feature_extractor.extractLines(curr_point_cloud);
-                    
-                    // Get most important points for all saved lines
-                    std::vector<Eigen::Vector2d> curr_feature_points = getLinesMainPoints(curr_lines);
-                    
-                    if (!first_scan && !prev_point_cloud.empty()) 
-                    {
-                        //initial guess
-                        slam::Transform2D odom_delta = computePoseDelta(odom_estimate, prev_odom_estimate);
-                        
-                        // Use extracted line features instead of raw points for ICP
-                        slam::ICPResult icp_result = alignPointClouds(
-                            prev_point_cloud,       
-                            curr_feature_points,     
-                            odom_delta, 
-                            100,    
-                            1e-3,  
-                            0.1   
-                        );
-
-                        //take the icp result and negate the angle change
-                        double icp_angle = std::atan2(icp_result.transform.rotation(1, 0), icp_result.transform.rotation(0, 0));
-                        double negated_angle = -icp_angle;
-                        
-                        // Build new rotation matrix with negated angle
-                        Eigen::Matrix2d new_rotation;
-                        new_rotation(0, 0) = std::cos(negated_angle);
-                        new_rotation(0, 1) = -std::sin(negated_angle);
-                        new_rotation(1, 0) = std::sin(negated_angle);
-                        new_rotation(1, 1) = std::cos(negated_angle);
-                        
-                        // Transform the translation to match the negated rotation
-                        // When negating angle, we need to reflect the translation y-component
-                        Eigen::Vector2d new_translation;
-                        new_translation.x() = icp_result.transform.translation.x();
-                        new_translation.y() = -icp_result.transform.translation.y();
-                        
-                        // Update the transform
-                        icp_result.transform.rotation = new_rotation;
-                        icp_result.transform.translation = new_translation;
-                        
-                        // Compare ICP's proposed motion vs Odometry's predicted motion
-                        double dx = icp_result.transform.translation.x() - odom_delta.translation.x();
-                        double dy = icp_result.transform.translation.y() - odom_delta.translation.y();
-                        double icptheta = std::atan2(icp_result.transform.rotation(1,0), icp_result.transform.rotation(0,0));
-                        double odomtheta = std::atan2(odom_delta.rotation(1,0), odom_delta.rotation(0,0));
-                        double angle_diff = icptheta - odomtheta;
-                        double dtheta = std::abs(std::atan2(std::sin(angle_diff), std::cos(angle_diff)));
-                        double trans_error = std::sqrt(dx*dx + dy*dy);
-                        
-                        std::cout << "[ICP] Angle change: " << (dtheta * 180.0 / M_PI) << "°" << std::endl;
-                        
-
-                        //validate ICP to ensure we only use it if it's not too big of a change
-                        // Thresholds: e.g., 20cm difference or 10 degrees difference is "too much"
-                        bool is_valid = icp_result.converged && (trans_error < 0.20) && (dtheta < (10.0 * M_PI / 180.0));
-
-                        if (is_valid) {
-                            curr_icp_pose = prev_icp_pose.transform(icp_result.transform);
-                        } else {
-                            curr_icp_pose = prev_icp_pose.transform(odom_delta);
-                        }
-                    }
-                    else
-                    {
-                        // First scan initialization
-                        curr_icp_pose = odom_estimate;
-                        first_scan = false;
-                    }
-                    
-                    // Update state for next iteration
-                    prev_point_cloud = curr_feature_points; //store only important points, no need to store everything
-                    prev_odom_estimate = odom_estimate;
-                    prev_icp_pose = curr_icp_pose; 
-                    
-                    // Visualize using the BEST estimate (Fused)
+                if (!scan.ranges.empty()) {
                     world_lidar_points = lidar.transformToWorld(scan, curr_odom_pose);
                 }
 
-                // Store history
-                odom_trajectory.push_back(curr_odom_pose); // Pure Odom
-                icp_trajectory.push_back(curr_icp_pose);   // Odom + ICP corrections
-                
-                //Create and Send Message to Visualizer
-                if (message_count % 1 == 0) {
+                // 3. Store trajectory history
+                odom_trajectory.push_back(curr_odom_pose);
 
-                    // Extract line features from point cloud
-                    std::vector<slam::LineSegment> extracted_lines;
-                    if (!world_lidar_points.empty()) 
-                    {
-                        std::vector<Eigen::Vector2d> point_cloud_eigen;
-                        for (const auto& pt : world_lidar_points) {
-                            point_cloud_eigen.push_back(Eigen::Vector2d(pt.x, pt.y));
-                        }
-                        extracted_lines = feature_extractor.extractLines(point_cloud_eigen);
-                    }
-                    
-                    std::cout << "[Main] Message " << message_count 
-                              << " | Odom: (" << curr_odom_pose.x << ", " << curr_odom_pose.y << ", " 
-                              << (curr_odom_pose.theta * 180.0 / M_PI) << "°)"
-                              << " | ICP: (" << curr_icp_pose.x << ", " << curr_icp_pose.y << ", "
-                              << (curr_icp_pose.theta * 180.0 / M_PI) << "°)"
-                              << " | Points: " << world_lidar_points.size()
-                              << " | Lines: " << extracted_lines.size() << std::endl;
-                    
-                    std::string viz_message = createVisualizationMessage(odom_trajectory, icp_trajectory, world_lidar_points, extracted_lines);
-                    publisher.publishMessage("visualization", viz_message);
-                }
-                
+                // 4. Build and publish visualization message
+                std::cout << "[Main] #" << message_count
+                          << " | Odom: (" << curr_odom_pose.x << ", " << curr_odom_pose.y << ", "
+                          << (curr_odom_pose.theta * 180.0 / M_PI) << "deg)"
+                          << " | Lidar pts: " << world_lidar_points.size() << std::endl;
+
+                // ICP trajectory is empty - passing empty vector
+                std::string viz_message = createVisualizationMessage(
+                    odom_trajectory, {}, world_lidar_points, {});
+                publisher.publishMessage("visualization", viz_message);
+
             } catch (const std::exception& e) {
-                std::cerr << "[Main] Error parsing message: " << e.what() << std::endl;
+                std::cerr << "[Main] Error: " << e.what() << std::endl;
             }
         };
         
