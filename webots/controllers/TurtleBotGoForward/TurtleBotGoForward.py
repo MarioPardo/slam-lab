@@ -90,11 +90,9 @@ while robot.step(TIME_STEP) != -1:
     
     # Lidar data
     lidar_ranges = lidar.getRangeImage()
-    lidar_fov = lidar.getFov()  # actual FOV in radians (e.g. 2*pi for 360-degree lidar)
+    lidar_fov = lidar.getFov()  # actual FOV in radians 
     lidar_data = {
         "count": len(lidar_ranges),
-        # Use actual lidar FOV so angles are correct regardless of 90 vs 360 degree lidar.
-        # Webots convention: ranges[0] is leftmost (angle_max), ranges[last] is rightmost (angle_min)
         "angle_min": -(lidar_fov / 2.0),
         "angle_max":  (lidar_fov / 2.0),
         "range_min": lidar.getMinRange(),
@@ -102,7 +100,7 @@ while robot.step(TIME_STEP) != -1:
         "ranges": [float('inf') if r == float('inf') else r for r in lidar_ranges]
     }
     
-    # Send robot state every 10 timesteps (reduces network load)
+    # Send robot state every X timesteps
     if step_count % 2 == 0:
         publisher.publish_robot_state(header, odometry, lidar_data)
         print(f"[Python] Sent robot state at step {step_count}")

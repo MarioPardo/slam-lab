@@ -184,45 +184,94 @@ int main(int /*argc*/, char* /*argv*/[]) {
         slam::OdometryProcessor odometry(0.033, 0.16);
         slam::LidarProcessor lidar;
         
-        // Trajectory history
-        std::vector<slam::Pose2D> odom_trajectory;
+        // Odom trajectory
+        std::vector<slam::Pose2D> odom_trajectory; //keeping for now during development
+        slam::Pose2D prev_odom_pose = {0.0, 0.0, 0.0};
+        
+        // ICP trajectory
+        std::vector<slam::Pose2D> icp_trajectory;
+        slam::Pose2D prev_icp_pose  = {0.0, 0.0, 0.0};
+        std::vector<Eigen::Vector2d> prev_point_cloud;
+        
+        bool first_scan = true;
         
         subscriber.subscribe("robot_state");
         std::cout << "[Main] Waiting for messages... (Press Ctrl+C to exit)" << std::endl;
-        std::cout << "[Main] Mode: Odometry + Lidar visualization (ICP disabled)" << std::endl;
+        std::cout << "[Main] Mode: Odom + Lidar viz | ICP = SHADOW (passive logging)" << std::endl;
         
         int message_count = 0;
         
-        // Message callback: odometry + lidar visualization only (ICP disabled)
-        auto messageCallback = [&publisher, &odometry, &lidar, &odom_trajectory, &message_count](const std::string& /*topic*/, const std::string& message)
+        // Message callback: odom map + ICP trajectory side-by-side
+        auto messageCallback = [&publisher, &odometry, &lidar, &odom_trajectory, &icp_trajectory,
+                                 &message_count, &prev_point_cloud, &prev_odom_pose,
+                                 &prev_icp_pose, &first_scan]
+                                (const std::string& /*topic*/, const std::string& message)
         {
             message_count++;
             
             try {
-                // 1. Odometry
+                //Odometry
                 slam::OdometryData odom = parseOdometryData(message);
                 slam::Pose2D curr_odom_pose = odometry.update(odom);
 
-                // 2. Lidar - transform scan to world frame for visualization
+                //Lidar: world-frame points for viz, robot-frame cloud for ICP
                 slam::LidarScan scan = parseLidarScan(message, odom.timestamp);
                 std::vector<slam::Point2D> world_lidar_points;
+                std::vector<Eigen::Vector2d> curr_point_cloud;
 
                 if (!scan.ranges.empty()) {
-                    world_lidar_points = lidar.transformToWorld(scan, curr_odom_pose);
+                    world_lidar_points   = lidar.transformToWorld(scan, curr_odom_pose);
+                    curr_point_cloud     = lidar.scanToPointCloud(scan);  // robot frame, for ICP
                 }
 
-                // 3. Store trajectory history
+                //ICP
+                slam::Pose2D curr_icp_pose = curr_odom_pose; //icp falls back to odom if issues
+
+                if (!first_scan && !prev_point_cloud.empty() && !curr_point_cloud.empty())
+                {
+                    slam::Transform2D odom_delta = computePoseDelta(prev_odom_pose, curr_odom_pose);
+
+                    double odom_dx     = odom_delta.translation.x();
+                    double odom_dy     = odom_delta.translation.y();
+                    double odom_dtheta = std::atan2(odom_delta.rotation(1, 0), odom_delta.rotation(0, 0));
+
+                    // Run ICP: align current scan onto previous scan
+                    slam::ICPResult icp = alignPointClouds(
+                        prev_point_cloud,  
+                        curr_point_cloud,   
+                        odom_delta,         // initial guess
+                        50,
+                        1e-4,
+                        0.5
+                    );
+
+                    //ICP returns rotation in neg angle (not sure why lol)
+                    double raw_angle    = std::atan2(icp.transform.rotation(1, 0), icp.transform.rotation(0, 0));
+                    double fixed_angle  = -raw_angle;
+                    Eigen::Matrix2d fixed_rotation;
+                    fixed_rotation << std::cos(fixed_angle), -std::sin(fixed_angle),
+                                      std::sin(fixed_angle),  std::cos(fixed_angle);
+                    slam::Transform2D fixed_transform(fixed_rotation, icp.transform.translation);
+
+            
+                    curr_icp_pose = prev_icp_pose.transform(fixed_transform);
+                }
+
+                //Update states
+                if (!curr_point_cloud.empty())
+                {
+                    prev_point_cloud = curr_point_cloud;
+                    prev_odom_pose   = curr_odom_pose;
+                    prev_icp_pose    = curr_icp_pose;
+                    first_scan       = false;
+                }
+
+                //Record both trajectories
                 odom_trajectory.push_back(curr_odom_pose);
+                icp_trajectory.push_back(curr_icp_pose);
 
-                // 4. Build and publish visualization message
-                std::cout << "[Main] #" << message_count
-                          << " | Odom: (" << curr_odom_pose.x << ", " << curr_odom_pose.y << ", "
-                          << (curr_odom_pose.theta * 180.0 / M_PI) << "deg)"
-                          << " | Lidar pts: " << world_lidar_points.size() << std::endl;
-
-                // ICP trajectory is empty - passing empty vector
-                std::string viz_message = createVisualizationMessage(
-                    odom_trajectory, {}, world_lidar_points, {});
+                // 6. Publish: odom map + both trajectories
+                std::string viz_message = createVisualizationMessage(odom_trajectory, icp_trajectory, world_lidar_points, {});
                 publisher.publishMessage("visualization", viz_message);
 
             } catch (const std::exception& e) {
@@ -232,7 +281,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
         
         // Listen for messages
         while (running) {
-            subscriber.receiveMessage(messageCallback, 1000); // 1 second timeout
+            subscriber.receiveMessage(messageCallback, 1000); // 1s timeout
         }
         
         std::cout << "[Main] Exiting gracefully" << std::endl;
